@@ -35,6 +35,11 @@ int db_init(void)
         "key_code INTEGER PRIMARY KEY, "
         "key_name TEXT NOT NULL, "
         "count INTEGER DEFAULT 0"
+        ");"
+
+        "CREATE TABLE IF NOT EXISTS settings ("
+        "key TEXT PRIMARY KEY, "
+        "value TEXT NOT NULL"
         ");";
 
     char *err = NULL;
@@ -121,4 +126,41 @@ int db_get_stats(KeyStat **out_stats)
 void db_free_stats(KeyStat *stats)
 {
     free(stats);
+}
+
+int db_get_setting_int(const char *key, int default_val)
+{
+    if (!g_db) return default_val;
+
+    const char *sql = "SELECT value FROM settings WHERE key = ?1;";
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return default_val;
+
+    sqlite3_bind_text(stmt, 1, key, -1, SQLITE_STATIC);
+    int result = default_val;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char *val = (const char *)sqlite3_column_text(stmt, 0);
+        if (val) result = atoi(val);
+    }
+    sqlite3_finalize(stmt);
+    return result;
+}
+
+void db_set_setting_int(const char *key, int value)
+{
+    if (!g_db) return;
+
+    char buf[32];
+    sprintf(buf, "%d", value);
+
+    const char *sql =
+        "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2);";
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL) != SQLITE_OK) return;
+
+    sqlite3_bind_text(stmt, 1, key, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, buf, -1, SQLITE_STATIC);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
 }

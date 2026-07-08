@@ -39,8 +39,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 
     tray_init(hInstance, hWnd, TRAY_ID);
 
-    ShowWindow(hWnd, nCmdShow);
-    UpdateWindow(hWnd);
+    if (db_get_setting_int("start_minimized", 0)) {
+        ShowWindow(hWnd, SW_HIDE);
+    } else {
+        ShowWindow(hWnd, nCmdShow);
+        UpdateWindow(hWnd);
+    }
 
     MSG msg;
     while (GetMessage(&msg, NULL, 0, 0)) {

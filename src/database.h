@@ -15,4 +15,7 @@ void db_increment_key(int key_code, const char *key_name);
 int db_get_stats(KeyStat **out_stats);
 void db_free_stats(KeyStat *stats);
 
+int  db_get_setting_int(const char *key, int default_val);
+void db_set_setting_int(const char *key, int value);
+
 #endif

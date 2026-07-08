@@ -36,4 +36,5 @@ target_link_libraries(ksc PRIVATE
     comctl32
     shell32
     advapi32
+    uxtheme
 )
