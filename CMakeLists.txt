@@ -23,6 +23,7 @@ set(SOURCES
     src/gui.c
     src/tray.c
     src/startup.c
+    src/ksc.rc
 )
 
 add_executable(ksc WIN32 ${SOURCES})

@@ -3,6 +3,7 @@
 #include "database.h"
 #include "startup.h"
 #include "tray.h"
+#include "resource.h"
 
 static HINSTANCE g_hInst = NULL;
 static HWND g_hListView = NULL;
@@ -145,13 +146,12 @@ static void update_theme(HWND hWnd)
 
         if (g_hListView) {
             if (g_pAllowDarkModeForWindow) {
-                SetWindowTheme(g_hListView, L"DarkMode_Explorer", NULL);
-            } else {
-                SetWindowTheme(g_hListView, L"", L"");
-                ListView_SetBkColor(g_hListView, RGB(37, 37, 38));
-                ListView_SetTextBkColor(g_hListView, RGB(37, 37, 38));
-                ListView_SetTextColor(g_hListView, RGB(212, 212, 212));
+                g_pAllowDarkModeForWindow(g_hListView, TRUE);
             }
+            SetWindowTheme(g_hListView, L"DarkMode_Explorer", NULL);
+            ListView_SetBkColor(g_hListView, RGB(37, 37, 38));
+            ListView_SetTextBkColor(g_hListView, RGB(37, 37, 38));
+            ListView_SetTextColor(g_hListView, RGB(212, 212, 212));
         }
     } else {
         g_hDarkBrush = NULL;
@@ -174,6 +174,9 @@ static void update_theme(HWND hWnd)
         }
 
         if (g_hListView) {
+            if (g_pAllowDarkModeForWindow) {
+                g_pAllowDarkModeForWindow(g_hListView, FALSE);
+            }
             SetWindowTheme(g_hListView, L"Explorer", NULL);
             ListView_SetBkColor(g_hListView, RGB(255, 255, 255));
             ListView_SetTextBkColor(g_hListView, RGB(255, 255, 255));
@@ -416,6 +419,27 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg,
         }
         return DefWindowProc(hWnd, msg, wParam, lParam);
 
+    case WM_NOTIFY: {
+        NMHDR *nmh = (NMHDR *)lParam;
+        if (nmh->idFrom == IDC_LISTVIEW && nmh->code == NM_CUSTOMDRAW) {
+            if (g_dark_mode) {
+                NMLVCUSTOMDRAW *lvcd = (NMLVCUSTOMDRAW *)lParam;
+                switch (lvcd->nmcd.dwDrawStage) {
+                case CDDS_PREPAINT:
+                    SetWindowLongPtr(hWnd, DWLP_MSGRESULT,
+                                     CDRF_NOTIFYITEMDRAW);
+                    return TRUE;
+                case CDDS_ITEMPREPAINT:
+                    lvcd->clrText   = RGB(212, 212, 212);
+                    lvcd->clrTextBk = RGB(37, 37, 38);
+                    SetWindowLongPtr(hWnd, DWLP_MSGRESULT, CDRF_NEWFONT);
+                    return TRUE;
+                }
+            }
+        }
+        break;
+    }
+
     case WM_TIMER:
         if (wParam == ID_TIMER_REFRESH) {
             refresh_list_view();
@@ -480,7 +504,6 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg,
     case WM_DESTROY:
         if (g_hDarkBrush) { DeleteObject(g_hDarkBrush); g_hDarkBrush = NULL; }
         if (g_hLvBrush)   { DeleteObject(g_hLvBrush);   g_hLvBrush = NULL;   }
-        if (g_hAppIcon)   { DestroyIcon(g_hAppIcon);    g_hAppIcon = NULL;   }
         KillTimer(hWnd, ID_TIMER_REFRESH);
         PostQuitMessage(0);
         return 0;
@@ -493,7 +516,10 @@ HWND gui_create_main_window(HINSTANCE hInstance)
 {
     g_hInst = hInstance;
 
-    g_hAppIcon = create_app_icon();
+    g_hAppIcon = LoadIcon(hInstance, MAKEINTRESOURCE(IDI_MAIN));
+    if (!g_hAppIcon) {
+        g_hAppIcon = create_app_icon();
+    }
 
     WNDCLASS wc = {0};
     wc.lpfnWndProc = MainWndProc;

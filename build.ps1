@@ -84,6 +84,48 @@ if (Test-Path $SqliteC) {
 
 # Build
 Write-Host ""
+Write-Host "[INFO] Generating application icon..."
+try {
+    Add-Type -AssemblyName System.Drawing -ErrorAction Stop
+    $bmp = New-Object System.Drawing.Bitmap(32, 32)
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $g.SmoothingMode = 'HighQuality'
+    $g.TextRenderingHint = 'AntiAliasGridFit'
+
+    $bg = New-Object System.Drawing.SolidBrush(
+        [System.Drawing.Color]::FromArgb(31, 41, 55))
+    $g.FillRectangle($bg, 0, 0, 32, 32)
+    $bg.Dispose()
+
+    $font = New-Object System.Drawing.Font('Segoe UI', 20,
+        [System.Drawing.FontStyle]::Bold)
+    $fg = New-Object System.Drawing.SolidBrush(
+        [System.Drawing.Color]::FromArgb(226, 232, 240))
+    $fmt = New-Object System.Drawing.StringFormat
+    $fmt.Alignment = 'Center'
+    $fmt.LineAlignment = 'Center'
+    $g.DrawString('K', $font, $fg, [System.Drawing.RectangleF]::new(0, 0, 32, 32), $fmt)
+
+    $g.Dispose()
+    $font.Dispose()
+    $fg.Dispose()
+    $fmt.Dispose()
+
+    $icon = [System.Drawing.Icon]::FromHandle($bmp.GetHicon())
+    $icoPath = Join-Path $PSScriptRoot 'src\ksc.ico'
+    $fs = [System.IO.FileStream]::new($icoPath, 'Create')
+    $icon.Save($fs)
+    $fs.Close()
+    $icon.Dispose()
+    $bmp.Dispose()
+
+    Write-Host "[OK] Icon generated: src\ksc.ico"
+} catch {
+    Write-Host "[WARN] Could not generate icon: $($_.Exception.Message)"
+    Write-Host "[WARN] The exe will use a runtime-generated icon instead."
+}
+
+Write-Host ""
 Write-Host "[INFO] Configuring project with CMake..."
 Write-Host ""
 

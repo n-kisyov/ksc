@@ -2,16 +2,17 @@
 #include "database.h"
 #include "ksc_private.h"
 
-static HHOOK g_hook = NULL;
+static HHOOK g_hKbHook = NULL;
+static HHOOK g_hMouseHook = NULL;
 static HANDLE g_thread = NULL;
 static DWORD g_thread_id = 0;
 
 const char *keyhook_get_name(unsigned int vk_code)
 {
     switch (vk_code) {
-    case VK_LBUTTON:    return "Left Mouse";
-    case VK_RBUTTON:    return "Right Mouse";
-    case VK_MBUTTON:    return "Middle Mouse";
+    case VK_LBUTTON:    return "Left Mouse Btn";
+    case VK_RBUTTON:    return "Right Mouse Btn";
+    case VK_MBUTTON:    return "Middle Mouse Btn";
     case VK_XBUTTON1:   return "Mouse X1";
     case VK_XBUTTON2:   return "Mouse X2";
     case VK_BACK:       return "Backspace";
@@ -132,7 +133,8 @@ const char *keyhook_get_name(unsigned int vk_code)
     return buf;
 }
 
-static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam)
+static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam,
+                                              LPARAM lParam)
 {
     if (nCode == HC_ACTION) {
         KBDLLHOOKSTRUCT *p = (KBDLLHOOKSTRUCT *)lParam;
@@ -144,13 +146,28 @@ static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lP
     return CallNextHookEx(NULL, nCode, wParam, lParam);
 }
 
+static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam,
+                                           LPARAM lParam)
+{
+    if (nCode == HC_ACTION) {
+        (void)lParam;
+        if (wParam == WM_LBUTTONDOWN) {
+            db_increment_key(VK_LBUTTON, keyhook_get_name(VK_LBUTTON));
+        } else if (wParam == WM_RBUTTONDOWN) {
+            db_increment_key(VK_RBUTTON, keyhook_get_name(VK_RBUTTON));
+        }
+    }
+    return CallNextHookEx(NULL, nCode, wParam, lParam);
+}
+
 static DWORD WINAPI HookThreadProc(LPVOID lpParam)
 {
     (void)lpParam;
 
-    g_hook = SetWindowsHookEx(WH_KEYBOARD_LL, LowLevelKeyboardProc,
-                              GetModuleHandle(NULL), 0);
-    if (!g_hook) return 1;
+    g_hKbHook = SetWindowsHookEx(WH_KEYBOARD_LL, LowLevelKeyboardProc,
+                                  GetModuleHandle(NULL), 0);
+    g_hMouseHook = SetWindowsHookEx(WH_MOUSE_LL, LowLevelMouseProc,
+                                     GetModuleHandle(NULL), 0);
 
     MSG msg;
     while (GetMessage(&msg, NULL, 0, 0) > 0) {
@@ -158,8 +175,8 @@ static DWORD WINAPI HookThreadProc(LPVOID lpParam)
         DispatchMessage(&msg);
     }
 
-    UnhookWindowsHookEx(g_hook);
-    g_hook = NULL;
+    if (g_hMouseHook) { UnhookWindowsHookEx(g_hMouseHook); g_hMouseHook = NULL; }
+    if (g_hKbHook)    { UnhookWindowsHookEx(g_hKbHook);    g_hKbHook = NULL; }
     return 0;
 }
 
