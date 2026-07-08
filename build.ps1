@@ -166,10 +166,59 @@ try {
 # Copy executable to project root
 if (Test-Path "build\ksc.exe") {
     Copy-Item -Path "build\ksc.exe" -Destination "ksc.exe" -Force
+
+    # Self-sign the executable
+    Write-Host ""
+    Write-Host "[INFO] Signing executable..."
+    $certSubject = "CN=bbounce.org KSC"
+    $cert = Get-ChildItem -Path Cert:\CurrentUser\My -CodeSigningCert |
+            Where-Object { $_.Subject -eq $certSubject } |
+            Select-Object -First 1
+    if (-not $cert) {
+        try {
+            $cert = New-SelfSignedCertificate `
+                -Type CodeSigningCert `
+                -Subject $certSubject `
+                -KeyUsage DigitalSignature `
+                -CertStoreLocation Cert:\CurrentUser\My `
+                -FriendlyName "KSC Signing Certificate"
+            Write-Host "[OK] Created self-signed code-signing certificate."
+        } catch {
+            Write-Host "[WARN] Could not create signing certificate: $($_.Exception.Message)"
+            Write-Host "[WARN] Skipping signature."
+        }
+    }
+    if ($cert) {
+        try {
+            Set-AuthenticodeSignature -FilePath "ksc.exe" -Certificate $cert -TimestampServer "http://timestamp.digicert.com" | Out-Null
+            Write-Host "[OK] Executable signed."
+
+            $certFile = Join-Path $PSScriptRoot "ksc.cer"
+            if (-not (Test-Path $certFile)) {
+                Export-Certificate -Cert $cert -FilePath $certFile -Type CERT | Out-Null
+                Write-Host "[INFO] Public certificate exported to ksc.cer"
+                Write-Host ""
+                Write-Host "  To permanently trust this build, run once (as Admin):"
+                Write-Host "    Import-Certificate -FilePath .\ksc.cer -CertStoreLocation Cert:\CurrentUser\TrustedPublisher"
+                Write-Host ""
+            }
+        } catch {
+            Write-Host "[WARN] Signing failed: $($_.Exception.Message)"
+            Write-Host "[WARN] The exe is unsigned. Right-click Properties > Unblock to run."
+        }
+    }
+
+    $srcLines = (Get-ChildItem -Path "$PSScriptRoot\src" -Include *.c,*.h -Recurse | Get-Content | Measure-Object -Line).Lines
+    $sqlLines = 0
+    if (Test-Path "$PSScriptRoot\sqlite3\sqlite3.c") {
+        $sqlLines = (Get-Content "$PSScriptRoot\sqlite3\sqlite3.c" | Measure-Object -Line).Lines
+    }
+
     Write-Host ""
     Write-Host "============================================"
     Write-Host "  Build successful!"
     Write-Host "  ksc.exe is ready in the project root."
+    Write-Host "  Source lines:  $srcLines (app) + $sqlLines (sqlite3)"
     Write-Host "============================================"
 } else {
     Write-Host ""

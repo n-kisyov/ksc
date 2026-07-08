@@ -34,6 +34,7 @@ void tray_show_menu(HWND hWnd, UINT id)
 
     HMENU hMenu = CreatePopupMenu();
     AppendMenu(hMenu, MF_STRING, IDM_SHOW, "Show/Hide");
+    AppendMenu(hMenu, MF_STRING, IDM_HEATMAP, "Key Heatmap");
     AppendMenu(hMenu, MF_SEPARATOR, 0, NULL);
     AppendMenu(hMenu, MF_STRING, IDM_SETTINGS, "Settings");
     AppendMenu(hMenu, MF_SEPARATOR, 0, NULL);

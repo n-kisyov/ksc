@@ -29,6 +29,7 @@
 #define IDM_QUIT               1003
 #define IDM_REFRESH            1004
 #define IDM_ABOUT              1005
+#define IDM_HEATMAP            1006
 
 #define IDC_LISTVIEW           2001
 #define IDC_STARTUP_CHK         2002

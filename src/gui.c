@@ -332,6 +332,292 @@ static void show_settings(HWND hParent)
     UpdateWindow(hDlg);
 }
 
+typedef struct {
+    int vk;
+    int x, y, w, h;
+    const char *label;
+} HeatKey;
+
+static const HeatKey g_heatKeys[] = {
+    {VK_ESCAPE,   10,  10, 40, 30, "Esc"},
+    {VK_F1,       60,  10, 35, 30, "F1"},
+    {VK_F2,      100,  10, 35, 30, "F2"},
+    {VK_F3,      140,  10, 35, 30, "F3"},
+    {VK_F4,      180,  10, 35, 30, "F4"},
+    {VK_F5,      235,  10, 35, 30, "F5"},
+    {VK_F6,      275,  10, 35, 30, "F6"},
+    {VK_F7,      315,  10, 35, 30, "F7"},
+    {VK_F8,      355,  10, 35, 30, "F8"},
+    {VK_F9,      410,  10, 35, 30, "F9"},
+    {VK_F10,     450,  10, 35, 30, "F10"},
+    {VK_F11,     490,  10, 35, 30, "F11"},
+    {VK_F12,     530,  10, 35, 30, "F12"},
+    {VK_SNAPSHOT,585,  10, 40, 30, "PrtSc"},
+    {VK_SCROLL,  630,  10, 40, 30, "ScrLk"},
+    {VK_PAUSE,   675,  10, 40, 30, "Pause"},
+
+    {VK_OEM_3,    10,  50, 41, 34, "`"},
+    {'1',         56,  50, 41, 34, "1"},
+    {'2',        102,  50, 41, 34, "2"},
+    {'3',        148,  50, 41, 34, "3"},
+    {'4',        194,  50, 41, 34, "4"},
+    {'5',        240,  50, 41, 34, "5"},
+    {'6',        286,  50, 41, 34, "6"},
+    {'7',        332,  50, 41, 34, "7"},
+    {'8',        378,  50, 41, 34, "8"},
+    {'9',        424,  50, 41, 34, "9"},
+    {'0',        470,  50, 41, 34, "0"},
+    {VK_OEM_MINUS,516, 50, 41, 34, "-"},
+    {VK_OEM_PLUS, 562, 50, 41, 34, "="},
+    {VK_BACK,    609,  50, 72, 34, "Back"},
+
+    {VK_TAB,      10,  90, 55, 34, "Tab"},
+    {'Q',         70,  90, 41, 34, "Q"},
+    {'W',        116,  90, 41, 34, "W"},
+    {'E',        162,  90, 41, 34, "E"},
+    {'R',        208,  90, 41, 34, "R"},
+    {'T',        254,  90, 41, 34, "T"},
+    {'Y',        300,  90, 41, 34, "Y"},
+    {'U',        346,  90, 41, 34, "U"},
+    {'I',        392,  90, 41, 34, "I"},
+    {'O',        438,  90, 41, 34, "O"},
+    {'P',        484,  90, 41, 34, "P"},
+    {VK_OEM_4,   530,  90, 41, 34, "["},
+    {VK_OEM_6,   576,  90, 41, 34, "]"},
+    {VK_OEM_5,   623,  90, 58, 34, "\\"},
+
+    {VK_CAPITAL,  10, 130, 66, 34, "Caps"},
+    {'A',         81, 130, 41, 34, "A"},
+    {'S',        127, 130, 41, 34, "S"},
+    {'D',        173, 130, 41, 34, "D"},
+    {'F',        219, 130, 41, 34, "F"},
+    {'G',        265, 130, 41, 34, "G"},
+    {'H',        311, 130, 41, 34, "H"},
+    {'J',        357, 130, 41, 34, "J"},
+    {'K',        403, 130, 41, 34, "K"},
+    {'L',        449, 130, 41, 34, "L"},
+    {VK_OEM_1,   495, 130, 41, 34, ";"},
+    {VK_OEM_7,   541, 130, 41, 34, "'"},
+    {VK_RETURN,  588, 130, 93, 74, "Enter"},
+
+    {VK_LSHIFT,   10, 170, 88, 34, "Shift"},
+    {'Z',        103, 170, 41, 34, "Z"},
+    {'X',        149, 170, 41, 34, "X"},
+    {'C',        195, 170, 41, 34, "C"},
+    {'V',        241, 170, 41, 34, "V"},
+    {'B',        287, 170, 41, 34, "B"},
+    {'N',        333, 170, 41, 34, "N"},
+    {'M',        379, 170, 41, 34, "M"},
+    {VK_OEM_COMMA,425,170, 41, 34, ","},
+    {VK_OEM_PERIOD,471,170,41, 34, "."},
+    {VK_OEM_2,   517, 170, 41, 34, "/"},
+    {VK_RSHIFT,  564, 170, 117, 34, "Shift"},
+
+    {VK_LCONTROL, 10, 210, 55, 34, "Ctrl"},
+    {VK_LWIN,     70, 210, 45, 34, "Win"},
+    {VK_LMENU,   120, 210, 45, 34, "Alt"},
+    {VK_SPACE,   172, 210, 280, 34, ""},
+    {VK_RMENU,   458, 210, 45, 34, "Alt"},
+    {VK_RWIN,    508, 210, 45, 34, "Win"},
+    {VK_APPS,    558, 210, 45, 34, "Menu"},
+    {VK_RCONTROL,608, 210, 55, 34, "Ctrl"},
+};
+
+#define HEAT_KEY_COUNT (sizeof(g_heatKeys) / sizeof(g_heatKeys[0]))
+
+static COLORREF heat_color(int64_t count, int64_t max_count)
+{
+    if (max_count <= 0 || count <= 0) return RGB(50, 50, 70);
+    if (count > max_count) count = max_count;
+    double t = (double)count / (double)max_count;
+
+    int r, g, b;
+    if (t < 0.2) {
+        double s = t / 0.2;
+        r = (int)(35 + s * 0);
+        g = (int)(35 + s * 65);
+        b = (int)(75 + s * 145);
+    } else if (t < 0.4) {
+        double s = (t - 0.2) / 0.2;
+        r = (int)(35 + s * 0);
+        g = (int)(100 + s * 80);
+        b = (int)(220 + s * -60);
+    } else if (t < 0.6) {
+        double s = (t - 0.4) / 0.2;
+        r = (int)(35 + s * 55);
+        g = (int)(180 + s * 40);
+        b = (int)(160 + s * -145);
+    } else if (t < 0.85) {
+        double s = (t - 0.6) / 0.25;
+        r = (int)(90 + s * 145);
+        g = (int)(220 + s * -105);
+        b = (int)(15 + s * -5);
+    } else {
+        double s = (t - 0.85) / 0.15;
+        r = (int)(235 + s * 0);
+        g = (int)(115 + s * -90);
+        b = (int)(10 + s * 0);
+    }
+
+    if (r < 0) r = 0; if (r > 240) r = 240;
+    if (g < 0) g = 0; if (g > 240) g = 240;
+    if (b < 0) b = 0; if (b > 240) b = 240;
+
+    return RGB(r, g, b);
+}
+
+static void draw_heatmap(HWND hWnd, HDC hdc, RECT *rcClient)
+{
+    BOOL dark = db_get_setting_int("dark_mode", 0);
+    COLORREF bgColor = dark ? RGB(40, 40, 45) : RGB(245, 245, 248);
+    COLORREF borderColor = dark ? RGB(60, 60, 65) : RGB(200, 200, 205);
+    COLORREF textCold = dark ? RGB(220, 220, 230) : RGB(30, 30, 40);
+    COLORREF textHot  = RGB(250, 250, 255);
+
+    HBRUSH hBg = CreateSolidBrush(bgColor);
+    FillRect(hdc, rcClient, hBg);
+    DeleteObject(hBg);
+
+    int64_t counts[256] = {0};
+    int64_t maxCount = 0;
+    KeyStat *stats = NULL;
+    int nStats = db_get_stats(&stats);
+    if (stats && nStats > 0) {
+        for (int i = 0; i < nStats; i++) {
+            if (stats[i].key_code >= 0 && stats[i].key_code < 256) {
+                counts[stats[i].key_code] = stats[i].count;
+                if (stats[i].count > maxCount) maxCount = stats[i].count;
+            }
+        }
+        db_free_stats(stats);
+    }
+
+    HFONT hFont = CreateFont(13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                              DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                              CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                              DEFAULT_PITCH | FF_DONTCARE, "Segoe UI");
+    HFONT hOldFont = SelectObject(hdc, hFont);
+    SetBkMode(hdc, TRANSPARENT);
+
+    HPEN hPen = CreatePen(PS_SOLID, 1, borderColor);
+    HPEN hOldPen = SelectObject(hdc, hPen);
+
+    for (int i = 0; i < (int)HEAT_KEY_COUNT; i++) {
+        const HeatKey *hk = &g_heatKeys[i];
+        int vk = hk->vk;
+        if (vk < 0 || vk >= 256) continue;
+        int64_t cnt = counts[vk];
+
+        COLORREF fill = heat_color(cnt, maxCount);
+        HBRUSH hKeyBr = CreateSolidBrush(fill);
+        SelectObject(hdc, hKeyBr);
+        Rectangle(hdc, hk->x, hk->y, hk->x + hk->w, hk->y + hk->h);
+        DeleteObject(hKeyBr);
+        SelectObject(hdc, hPen);
+
+        if (hk->label && hk->label[0]) {
+            double t = (maxCount > 0) ? (double)cnt / (double)maxCount : 0.0;
+            SetTextColor(hdc, (t > 0.6) ? textHot : textCold);
+            RECT lr = {hk->x, hk->y, hk->x + hk->w, hk->y + hk->h};
+            DrawText(hdc, hk->label, -1, &lr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
+    }
+
+    SelectObject(hdc, hOldPen);
+    DeleteObject(hPen);
+    SelectObject(hdc, hOldFont);
+    DeleteObject(hFont);
+
+    int legendY = 265;
+    COLORREF legendSteps[] = {
+        heat_color(0, 100),
+        heat_color(20, 100),
+        heat_color(40, 100),
+        heat_color(60, 100),
+        heat_color(80, 100),
+        heat_color(100, 100),
+    };
+    int segW = 50;
+    int legendX = rcClient->right / 2 - (6 * segW) / 2;
+
+    SetTextColor(hdc, dark ? RGB(200, 200, 210) : RGB(80, 80, 90));
+    HFONT hSmFont = CreateFont(11, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                                CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                                DEFAULT_PITCH | FF_DONTCARE, "Segoe UI");
+    SelectObject(hdc, hSmFont);
+
+    RECT ll = {legendX - 5, legendY + 14, legendX + 6 * segW + 5, legendY + 36};
+    DrawText(hdc, "low", -1, &ll, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    ll.left = legendX + 6 * segW - 35;
+    DrawText(hdc, "high", -1, &ll, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+
+    for (int i = 0; i < 6; i++) {
+        HBRUSH hLBr = CreateSolidBrush(legendSteps[i]);
+        SelectObject(hdc, hLBr);
+        Rectangle(hdc, legendX + i * segW, legendY + 2,
+                  legendX + (i + 1) * segW, legendY + 28);
+        DeleteObject(hLBr);
+        SelectObject(hdc, hPen);
+    }
+
+    SelectObject(hdc, hOldPen);
+    SelectObject(hdc, hOldFont);
+    DeleteObject(hSmFont);
+}
+
+static LRESULT CALLBACK HeatmapWndProc(HWND hWnd, UINT msg,
+                                        WPARAM wParam, LPARAM lParam)
+{
+    switch (msg) {
+    case WM_CREATE: {
+        SetTimer(hWnd, ID_TIMER_REFRESH, 10000, NULL);
+        return 0;
+    }
+    case WM_TIMER:
+        if (wParam == ID_TIMER_REFRESH) InvalidateRect(hWnd, NULL, FALSE);
+        return 0;
+    case WM_ERASEBKGND:
+        return TRUE;
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hWnd, &ps);
+        RECT rc;
+        GetClientRect(hWnd, &rc);
+        draw_heatmap(hWnd, hdc, &rc);
+        EndPaint(hWnd, &ps);
+        return 0;
+    }
+    case WM_CLOSE:
+        KillTimer(hWnd, ID_TIMER_REFRESH);
+        DestroyWindow(hWnd);
+        return 0;
+    }
+    return DefWindowProc(hWnd, msg, wParam, lParam);
+}
+
+static void show_heatmap(HWND hParent)
+{
+    static BOOL registered = FALSE;
+    if (!registered) {
+        WNDCLASS wc = {0};
+        wc.lpfnWndProc = HeatmapWndProc;
+        wc.hInstance = g_hInst;
+        wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+        wc.lpszClassName = "KSC_Heatmap";
+        RegisterClass(&wc);
+        registered = TRUE;
+    }
+
+    HWND hDlg = CreateWindow("KSC_Heatmap", "KSC - Key Heatmap",
+                 WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+                 CW_USEDEFAULT, CW_USEDEFAULT, 708, 330,
+                 hParent, NULL, g_hInst, NULL);
+    ShowWindow(hDlg, SW_SHOW);
+    UpdateWindow(hDlg);
+}
+
 static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg,
                                     WPARAM wParam, LPARAM lParam)
 {
@@ -368,6 +654,7 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg,
         HMENU hMenu = CreateMenu();
         HMENU hFileMenu = CreatePopupMenu();
         AppendMenu(hFileMenu, MF_STRING, IDM_SETTINGS, "Settings");
+        AppendMenu(hFileMenu, MF_STRING, IDM_HEATMAP, "Key Heatmap");
         AppendMenu(hFileMenu, MF_SEPARATOR, 0, NULL);
         AppendMenu(hFileMenu, MF_STRING, IDM_QUIT, "Quit");
         AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hFileMenu, "File");
@@ -479,6 +766,9 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg,
             break;
         case IDM_SETTINGS:
             show_settings(hWnd);
+            break;
+        case IDM_HEATMAP:
+            show_heatmap(hWnd);
             break;
         case IDM_REFRESH:
             refresh_list_view();
