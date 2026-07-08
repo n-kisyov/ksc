@@ -1,0 +1,2 @@
+# ksc
+ksc - Keystroke Counter
