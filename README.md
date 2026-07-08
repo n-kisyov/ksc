@@ -29,8 +29,8 @@ A lightweight Windows application written in modern C that counts every keystrok
 
 ### Option 1: Automated Build
 
-```bat
-build.bat
+```powershell
+.\build.ps1
 ```
 
 This script will:
@@ -58,7 +58,7 @@ cmake --build . --config Release
 ```
 ksc/
 +-- CMakeLists.txt          Build configuration
-+-- build.bat               Automated build script
++-- build.ps1               Automated build script (PowerShell)
 +-- README.md               This file
 +-- src/
     +-- main.c              Application entry point

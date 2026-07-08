@@ -1,0 +1,136 @@
+$ErrorActionPreference = "Stop"
+
+Write-Host "============================================"
+Write-Host "  KSC - Keystroke Counter Build Script"
+Write-Host "============================================"
+Write-Host ""
+
+# Check for CMake
+$cmake = Get-Command cmake -ErrorAction SilentlyContinue
+if (-not $cmake) {
+    Write-Host "[ERROR] CMake is not installed or not in PATH."
+    Write-Host "Download from: https://cmake.org/download/"
+    exit 1
+}
+Write-Host "[OK] CMake found: $($cmake.Source)"
+
+# Check for GCC (MinGW)
+$gcc = Get-Command gcc -ErrorAction SilentlyContinue
+if (-not $gcc) {
+    Write-Host "[ERROR] GCC (MinGW-w64) is not installed or not in PATH."
+    Write-Host "Download from: https://www.mingw-w64.org/"
+    exit 1
+}
+Write-Host "[OK] GCC found: $($gcc.Source)"
+
+# Download SQLite3 amalgamation if not present
+$SQLiteYear = "2024"
+$SQLiteVer  = "3460100"
+$SQLiteUrl  = "https://www.sqlite.org/$SQLiteYear/sqlite-amalgamation-$SQLiteVer.zip"
+$SqliteDir  = "sqlite3"
+$SqliteZip  = "$SqliteDir\sqlite3.zip"
+$SqliteC    = "$SqliteDir\sqlite3.c"
+
+if (Test-Path $SqliteC) {
+    Write-Host "[OK] SQLite3 amalgamation found."
+} else {
+    Write-Host "[INFO] SQLite3 amalgamation not found. Downloading..."
+    if (-not (Test-Path $SqliteDir)) {
+        New-Item -ItemType Directory -Path $SqliteDir | Out-Null
+    }
+
+    Write-Host "[INFO] Downloading from sqlite.org ..."
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        Invoke-WebRequest -Uri $SQLiteUrl -OutFile $SqliteZip -UseBasicParsing
+    } catch {
+        Write-Host "[ERROR] Failed to download SQLite3 amalgamation."
+        Write-Host "Please download manually from https://www.sqlite.org/download.html"
+        Write-Host "Extract sqlite3.c and sqlite3.h into the sqlite3\ directory."
+        exit 1
+    }
+
+    Write-Host "[INFO] Extracting SQLite3 amalgamation..."
+    $TempDir = "$SqliteDir\temp"
+    try {
+        Expand-Archive -Path $SqliteZip -DestinationPath $TempDir -Force
+    } catch {
+        Write-Host "[ERROR] Failed to extract SQLite3 amalgamation."
+        exit 1
+    }
+
+    $ExtractedDir = Get-ChildItem -Path $TempDir -Directory | Select-Object -First 1
+    if (-not $ExtractedDir) {
+        Write-Host "[ERROR] Unexpected archive structure."
+        exit 1
+    }
+
+    Move-Item -Path "$($ExtractedDir.FullName)\sqlite3.c" -Destination $SqliteDir -Force
+    Move-Item -Path "$($ExtractedDir.FullName)\sqlite3.h" -Destination $SqliteDir -Force
+    $sqlite3ext = "$($ExtractedDir.FullName)\sqlite3ext.h"
+    if (Test-Path $sqlite3ext) {
+        Move-Item -Path $sqlite3ext -Destination $SqliteDir -Force
+    }
+
+    Remove-Item -Recurse -Force $TempDir
+    Remove-Item -Force $SqliteZip
+
+    if (-not (Test-Path $SqliteC)) {
+        Write-Host "[ERROR] Failed to extract sqlite3.c"
+        exit 1
+    }
+    Write-Host "[OK] SQLite3 amalgamation downloaded and extracted."
+}
+
+# Build
+Write-Host ""
+Write-Host "[INFO] Configuring project with CMake..."
+Write-Host ""
+
+if (Test-Path "build") {
+    Remove-Item -Recurse -Force "build"
+}
+New-Item -ItemType Directory -Path "build" | Out-Null
+
+Push-Location "build"
+try {
+    $cmakeArgs = @(
+        "..",
+        "-G", "MinGW Makefiles",
+        "-DCMAKE_BUILD_TYPE=Release",
+        "-DCMAKE_C_COMPILER=gcc"
+    )
+    & cmake @cmakeArgs
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host ""
+        Write-Host "[ERROR] CMake configuration failed."
+        exit 1
+    }
+
+    Write-Host ""
+    Write-Host "[INFO] Building project..."
+    Write-Host ""
+
+    & cmake --build . --config Release
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host ""
+        Write-Host "[ERROR] Build failed."
+        exit 1
+    }
+} finally {
+    Pop-Location
+}
+
+# Copy executable to project root
+if (Test-Path "build\ksc.exe") {
+    Copy-Item -Path "build\ksc.exe" -Destination "ksc.exe" -Force
+    Write-Host ""
+    Write-Host "============================================"
+    Write-Host "  Build successful!"
+    Write-Host "  ksc.exe is ready in the project root."
+    Write-Host "============================================"
+} else {
+    Write-Host ""
+    Write-Host "[ERROR] Build completed but ksc.exe not found."
+    exit 1
+}
