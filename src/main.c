@@ -10,6 +10,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     (void)hPrevInstance;
     (void)lpCmdLine;
 
+    HANDLE hMutex = CreateMutex(NULL, TRUE, "KSC_SingleInstance");
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        return 0;
+    }
+
     INITCOMMONCONTROLSEX icex;
     icex.dwSize = sizeof(icex);
     icex.dwICC = ICC_LISTVIEW_CLASSES;
@@ -20,6 +25,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
                    "KSC Error", MB_ICONERROR);
         return 1;
     }
+
+    gui_init_dark_mode();
 
     HWND hWnd = gui_create_main_window(hInstance);
     if (!hWnd) {
@@ -37,7 +44,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         return 1;
     }
 
-    tray_init(hInstance, hWnd, TRAY_ID);
+    tray_init(hWnd, TRAY_ID, gui_get_app_icon());
 
     if (db_get_setting_int("start_minimized", 0)) {
         ShowWindow(hWnd, SW_HIDE);

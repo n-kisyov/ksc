@@ -9,6 +9,84 @@ static HWND g_hListView = NULL;
 static BOOL g_dark_mode = FALSE;
 static HBRUSH g_hDarkBrush = NULL;
 static HBRUSH g_hLvBrush = NULL;
+static HICON g_hAppIcon = NULL;
+
+typedef void (WINAPI *fnSetPreferredAppMode)(int mode);
+typedef BOOL (WINAPI *fnAllowDarkModeForWindow)(HWND hWnd, BOOL allow);
+typedef void (WINAPI *fnFlushMenuThemes)(void);
+
+static fnSetPreferredAppMode    g_pSetPreferredAppMode = NULL;
+static fnAllowDarkModeForWindow g_pAllowDarkModeForWindow = NULL;
+static fnFlushMenuThemes        g_pFlushMenuThemes = NULL;
+
+static HICON create_app_icon(void)
+{
+    HDC hdcScreen = GetDC(NULL);
+    HDC hdcMem = CreateCompatibleDC(hdcScreen);
+
+    HBITMAP hbmColor = CreateCompatibleBitmap(hdcScreen, 32, 32);
+    HBITMAP hbmMask = CreateBitmap(32, 32, 1, 1, NULL);
+
+    SelectObject(hdcMem, hbmColor);
+
+    HBRUSH hBrBg = CreateSolidBrush(RGB(31, 41, 55));
+    RECT rc = {0, 0, 32, 32};
+    FillRect(hdcMem, &rc, hBrBg);
+    DeleteObject(hBrBg);
+
+    SetBkMode(hdcMem, TRANSPARENT);
+    SetTextColor(hdcMem, RGB(226, 232, 240));
+    HFONT hFont = CreateFont(23, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+                              DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                              CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                              DEFAULT_PITCH | FF_DONTCARE, "Segoe UI");
+    HFONT hOldFont = SelectObject(hdcMem, hFont);
+    DrawText(hdcMem, "K", 1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    SelectObject(hdcMem, hOldFont);
+    DeleteObject(hFont);
+
+    HDC hdcMask = CreateCompatibleDC(hdcScreen);
+    SelectObject(hdcMask, hbmMask);
+    HBRUSH hBrMask = CreateSolidBrush(RGB(255, 255, 255));
+    FillRect(hdcMask, &rc, hBrMask);
+    DeleteObject(hBrMask);
+
+    ICONINFO ii = {0};
+    ii.fIcon = TRUE;
+    ii.hbmMask = hbmMask;
+    ii.hbmColor = hbmColor;
+    HICON hIcon = CreateIconIndirect(&ii);
+
+    DeleteObject(hbmColor);
+    DeleteObject(hbmMask);
+    DeleteDC(hdcMask);
+    DeleteDC(hdcMem);
+    ReleaseDC(NULL, hdcScreen);
+
+    return hIcon;
+}
+
+HICON gui_get_app_icon(void)
+{
+    return g_hAppIcon;
+}
+
+void gui_init_dark_mode(void)
+{
+    HMODULE hUx = GetModuleHandle("uxtheme.dll");
+    if (!hUx) return;
+
+    g_pSetPreferredAppMode = (fnSetPreferredAppMode)
+        GetProcAddress(hUx, MAKEINTRESOURCEA(135));
+    g_pAllowDarkModeForWindow = (fnAllowDarkModeForWindow)
+        GetProcAddress(hUx, MAKEINTRESOURCEA(133));
+    g_pFlushMenuThemes = (fnFlushMenuThemes)
+        GetProcAddress(hUx, MAKEINTRESOURCEA(136));
+
+    if (g_pSetPreferredAppMode) {
+        g_pSetPreferredAppMode(1);
+    }
+}
 
 static void refresh_list_view(void)
 {
@@ -49,15 +127,51 @@ static void update_theme(HWND hWnd)
         g_hDarkBrush = CreateSolidBrush(RGB(30, 30, 30));
         g_hLvBrush   = CreateSolidBrush(RGB(37, 37, 38));
 
+        BOOL useDark = TRUE;
+        DwmSetWindowAttribute(hWnd, DWMWA_USE_IMMERSIVE_DARK_MODE,
+                              &useDark, sizeof(useDark));
+
+        if (g_pAllowDarkModeForWindow) {
+            g_pAllowDarkModeForWindow(hWnd, TRUE);
+        }
+
+        HMENU hMenu = GetMenu(hWnd);
+        if (hMenu) {
+            MENUINFO mi = { sizeof(mi) };
+            mi.fMask = MIM_BACKGROUND;
+            mi.hbrBack = g_hDarkBrush;
+            SetMenuInfo(hMenu, &mi);
+        }
+
         if (g_hListView) {
-            SetWindowTheme(g_hListView, L"", L"");
-            ListView_SetBkColor(g_hListView, RGB(37, 37, 38));
-            ListView_SetTextBkColor(g_hListView, RGB(37, 37, 38));
-            ListView_SetTextColor(g_hListView, RGB(212, 212, 212));
+            if (g_pAllowDarkModeForWindow) {
+                SetWindowTheme(g_hListView, L"DarkMode_Explorer", NULL);
+            } else {
+                SetWindowTheme(g_hListView, L"", L"");
+                ListView_SetBkColor(g_hListView, RGB(37, 37, 38));
+                ListView_SetTextBkColor(g_hListView, RGB(37, 37, 38));
+                ListView_SetTextColor(g_hListView, RGB(212, 212, 212));
+            }
         }
     } else {
         g_hDarkBrush = NULL;
         g_hLvBrush   = NULL;
+
+        BOOL useDark = FALSE;
+        DwmSetWindowAttribute(hWnd, DWMWA_USE_IMMERSIVE_DARK_MODE,
+                              &useDark, sizeof(useDark));
+
+        if (g_pAllowDarkModeForWindow) {
+            g_pAllowDarkModeForWindow(hWnd, FALSE);
+        }
+
+        HMENU hMenu = GetMenu(hWnd);
+        if (hMenu) {
+            MENUINFO mi = { sizeof(mi) };
+            mi.fMask = MIM_BACKGROUND;
+            mi.hbrBack = NULL;
+            SetMenuInfo(hMenu, &mi);
+        }
 
         if (g_hListView) {
             SetWindowTheme(g_hListView, L"Explorer", NULL);
@@ -67,8 +181,23 @@ static void update_theme(HWND hWnd)
         }
     }
 
+    if (g_pFlushMenuThemes) g_pFlushMenuThemes();
+
     if (g_hListView) InvalidateRect(g_hListView, NULL, TRUE);
-    if (hWnd) InvalidateRect(hWnd, NULL, TRUE);
+    if (hWnd) {
+        SetWindowPos(hWnd, NULL, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
+                     SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        InvalidateRect(hWnd, NULL, TRUE);
+    }
+}
+
+static void update_auto_refresh(HWND hWnd)
+{
+    KillTimer(hWnd, ID_TIMER_REFRESH);
+    if (db_get_setting_int("auto_refresh", 1)) {
+        SetTimer(hWnd, ID_TIMER_REFRESH, 10000, NULL);
+    }
 }
 
 static LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg,
@@ -103,6 +232,15 @@ static LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg,
                      (HMENU)IDC_DARK_MODE_CHK, g_hInst, NULL);
         if (db_get_setting_int("dark_mode", 0))
             SendDlgItemMessage(hWnd, IDC_DARK_MODE_CHK,
+                               BM_SETCHECK, BST_CHECKED, 0);
+
+        y += 28;
+        CreateWindow("BUTTON", "Auto-refresh stats (10s)",
+                     WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                     20, y, 220, 22, hWnd,
+                     (HMENU)IDC_AUTO_REFRESH_CHK, g_hInst, NULL);
+        if (db_get_setting_int("auto_refresh", 1))
+            SendDlgItemMessage(hWnd, IDC_AUTO_REFRESH_CHK,
                                BM_SETCHECK, BST_CHECKED, 0);
 
         y += 40;
@@ -144,10 +282,13 @@ static LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg,
                                BM_GETCHECK, 0, 0) == BST_CHECKED);
             int dark = (SendDlgItemMessage(hWnd, IDC_DARK_MODE_CHK,
                           BM_GETCHECK, 0, 0) == BST_CHECKED);
+            int autoref = (SendDlgItemMessage(hWnd, IDC_AUTO_REFRESH_CHK,
+                             BM_GETCHECK, 0, 0) == BST_CHECKED);
 
             startup_set_enabled(startup);
             db_set_setting_int("start_minimized", minimized);
             db_set_setting_int("dark_mode", dark);
+            db_set_setting_int("auto_refresh", autoref);
 
             HWND hMain = (HWND)GetWindowLongPtr(hWnd, GWLP_USERDATA);
             if (hMain) PostMessage(hMain, WM_THEME_CHANGED, 0, 0);
@@ -182,7 +323,7 @@ static void show_settings(HWND hParent)
 
     HWND hDlg = CreateWindow("KSC_Settings", "KSC Settings",
                  WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
-                 CW_USEDEFAULT, CW_USEDEFAULT, 280, 195,
+                 CW_USEDEFAULT, CW_USEDEFAULT, 280, 220,
                  hParent, NULL, g_hInst, hParent);
     ShowWindow(hDlg, SW_SHOW);
     UpdateWindow(hDlg);
@@ -239,6 +380,8 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg,
         SetMenu(hWnd, hMenu);
 
         update_theme(hWnd);
+        update_auto_refresh(hWnd);
+        refresh_list_view();
         return 0;
     }
 
@@ -281,6 +424,7 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg,
 
     case WM_THEME_CHANGED:
         update_theme(hWnd);
+        update_auto_refresh(hWnd);
         return 0;
 
     case WM_TRAYICON:
@@ -336,6 +480,7 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg,
     case WM_DESTROY:
         if (g_hDarkBrush) { DeleteObject(g_hDarkBrush); g_hDarkBrush = NULL; }
         if (g_hLvBrush)   { DeleteObject(g_hLvBrush);   g_hLvBrush = NULL;   }
+        if (g_hAppIcon)   { DestroyIcon(g_hAppIcon);    g_hAppIcon = NULL;   }
         KillTimer(hWnd, ID_TIMER_REFRESH);
         PostQuitMessage(0);
         return 0;
@@ -348,10 +493,12 @@ HWND gui_create_main_window(HINSTANCE hInstance)
 {
     g_hInst = hInstance;
 
+    g_hAppIcon = create_app_icon();
+
     WNDCLASS wc = {0};
     wc.lpfnWndProc = MainWndProc;
     wc.hInstance = hInstance;
-    wc.hIcon = LoadIcon(NULL, IDI_APPLICATION);
+    wc.hIcon = g_hAppIcon;
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
     wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
     wc.lpszClassName = "KSC_MainWindow";

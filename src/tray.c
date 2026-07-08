@@ -3,9 +3,8 @@
 
 static NOTIFYICONDATA g_nid;
 
-int tray_init(HINSTANCE hInst, HWND hWnd, UINT id)
+int tray_init(HWND hWnd, UINT id, HICON hIcon)
 {
-    (void)hInst;
 
     ZeroMemory(&g_nid, sizeof(g_nid));
     g_nid.cbSize = sizeof(NOTIFYICONDATA);
@@ -13,7 +12,7 @@ int tray_init(HINSTANCE hInst, HWND hWnd, UINT id)
     g_nid.uID = id;
     g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     g_nid.uCallbackMessage = WM_TRAYICON;
-    g_nid.hIcon = LoadIcon(NULL, IDI_APPLICATION);
+    g_nid.hIcon = hIcon ? hIcon : LoadIcon(NULL, IDI_APPLICATION);
     strcpy(g_nid.szTip, "KSC - Keystroke Counter");
 
     return Shell_NotifyIcon(NIM_ADD, &g_nid);
