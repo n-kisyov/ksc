@@ -251,6 +251,18 @@ static LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg,
                      WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                      170, y, 80, 25, hWnd,
                      (HMENU)IDOK, g_hInst, NULL);
+
+        BOOL dark = db_get_setting_int("dark_mode", 0);
+        if (dark) {
+            BOOL useDark = TRUE;
+            DwmSetWindowAttribute(hWnd, DWMWA_USE_IMMERSIVE_DARK_MODE,
+                                  &useDark, sizeof(useDark));
+            if (g_pAllowDarkModeForWindow)
+                g_pAllowDarkModeForWindow(hWnd, TRUE);
+            SetWindowPos(hWnd, NULL, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
+                         SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        }
         return 0;
     }
 
@@ -573,6 +585,18 @@ static LRESULT CALLBACK HeatmapWndProc(HWND hWnd, UINT msg,
     switch (msg) {
     case WM_CREATE: {
         SetTimer(hWnd, ID_TIMER_REFRESH, 10000, NULL);
+
+        BOOL dark = db_get_setting_int("dark_mode", 0);
+        if (dark) {
+            BOOL useDark = TRUE;
+            DwmSetWindowAttribute(hWnd, DWMWA_USE_IMMERSIVE_DARK_MODE,
+                                  &useDark, sizeof(useDark));
+            if (g_pAllowDarkModeForWindow)
+                g_pAllowDarkModeForWindow(hWnd, TRUE);
+            SetWindowPos(hWnd, NULL, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
+                         SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        }
         return 0;
     }
     case WM_TIMER:
@@ -764,8 +788,8 @@ static LRESULT CALLBACK StatsWndProc(HWND hWnd, UINT msg,
                      316, yTop, 30, dph, hWnd, NULL, g_hInst, NULL);
 
         HWND hApp = CreateWindow(WC_COMBOBOX, "",
-                     WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
-                     350, yTop, 120, 300,
+                     WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+                     350, yTop, 120, 200,
                      hWnd, (HMENU)IDC_APP_COMBO, g_hInst, NULL);
         data->hAppCombo = hApp;
         populate_app_combo(hApp);
@@ -871,6 +895,18 @@ static LRESULT CALLBACK StatsWndProc(HWND hWnd, UINT msg,
         if (dark && g_hDarkBrush) {
             HDC hdc = (HDC)wParam;
             SetBkMode(hdc, TRANSPARENT);
+            SetTextColor(hdc, RGB(230, 230, 230));
+            return (LRESULT)g_hDarkBrush;
+        }
+        return DefWindowProc(hWnd, msg, wParam, lParam);
+    }
+
+    case WM_CTLCOLORLISTBOX: {
+        BOOL dark = db_get_setting_int("dark_mode", 0);
+        if (dark && g_hDarkBrush) {
+            HDC hdc = (HDC)wParam;
+            SetBkMode(hdc, TRANSPARENT);
+            SetBkColor(hdc, RGB(37, 37, 38));
             SetTextColor(hdc, RGB(230, 230, 230));
             return (LRESULT)g_hDarkBrush;
         }
