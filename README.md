@@ -1,22 +1,6 @@
 # ksc - Keystroke Counter
 
-```
-  ██╗  ██╗███████╗ ██████╗
-  ██║ ██╔╝██╔════╝██╔════╝
-  █████╔╝ ███████╗██║
-  ██╔═██╗ ╚════██║██║
-  ██║  ██╗███████║╚██████╗
-  ╚═╝  ╚═╝╚══════╝ ╚═════╝
-     Keystroke Counter v0.9
-```
-
-A lightweight Windows application written in modern C that counts every keystroke on your keyboard, tracks per-application usage, and stores statistics in a SQLite database.
-
-<p align="center">
-  <tt>████████  ████  ████████  ████  ████████  ████</tt><br>
-  <tt>██  ████  ████  ██  ████  ████  ██  ████  ████</tt><br>
-  <tt>████  ███  ████    ██  ██  ██  ██    ██  ██</tt>
-</p>
+**Version 0.9** — A lightweight Windows application written in modern C that counts every keystroke on your keyboard, tracks per-application usage, and stores statistics in a SQLite database.
 
 ## Features
 
