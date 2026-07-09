@@ -161,6 +161,7 @@ int db_get_stats(KeyStat **out_stats)
         strncpy(stats[count].key_name,
                 (const char *)sqlite3_column_text(stmt, 1), 63);
         stats[count].key_name[63] = '\0';
+        stats[count].app[0] = '\0';
         stats[count].count = sqlite3_column_int64(stmt, 2);
         count++;
     }
@@ -176,19 +177,32 @@ void db_free_stats(KeyStat *stats)
 }
 
 int db_get_date_range_stats(const char *from, const char *to,
-                             const char *app, KeyStat **out_stats)
+                             const char *app, int detailed,
+                             KeyStat **out_stats)
 {
     if (!g_db || !out_stats || !from || !to) return 0;
 
     const char *appFilter = (app && app[0]) ? app : "";
-    const char *sql =
-        "SELECT kd.key_code, kc.key_name, SUM(kd.count) "
-        "FROM key_daily kd "
-        "LEFT JOIN key_counts kc ON kd.key_code = kc.key_code "
-        "WHERE kd.date >= ?1 AND kd.date <= ?2 "
-        "AND (?3 = '' OR kd.app = ?3) "
-        "GROUP BY kd.key_code "
-        "ORDER BY SUM(kd.count) DESC;";
+    const char *sql;
+    if (detailed) {
+        sql =
+            "SELECT kd.key_code, kc.key_name, kd.app, SUM(kd.count) "
+            "FROM key_daily kd "
+            "LEFT JOIN key_counts kc ON kd.key_code = kc.key_code "
+            "WHERE kd.date >= ?1 AND kd.date <= ?2 "
+            "AND (?3 = '' OR kd.app = ?3) "
+            "GROUP BY kd.key_code, kd.app "
+            "ORDER BY SUM(kd.count) DESC;";
+    } else {
+        sql =
+            "SELECT kd.key_code, kc.key_name, '' AS app, SUM(kd.count) "
+            "FROM key_daily kd "
+            "LEFT JOIN key_counts kc ON kd.key_code = kc.key_code "
+            "WHERE kd.date >= ?1 AND kd.date <= ?2 "
+            "AND (?3 = '' OR kd.app = ?3) "
+            "GROUP BY kd.key_code "
+            "ORDER BY SUM(kd.count) DESC;";
+    }
 
     sqlite3_stmt *stmt = NULL;
     if (sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL) != SQLITE_OK)
@@ -228,7 +242,16 @@ int db_get_date_range_stats(const char *from, const char *to,
             strncpy(stats[count].key_name, buf, 63);
         }
         stats[count].key_name[63] = '\0';
-        stats[count].count = sqlite3_column_int64(stmt, 2);
+        {
+            const char *appName = (const char *)sqlite3_column_text(stmt, 2);
+            if (appName) {
+                strncpy(stats[count].app, appName, 255);
+            } else {
+                stats[count].app[0] = '\0';
+            }
+            stats[count].app[255] = '\0';
+        }
+        stats[count].count = sqlite3_column_int64(stmt, 3);
         count++;
     }
 

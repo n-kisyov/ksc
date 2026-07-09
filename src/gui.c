@@ -640,7 +640,7 @@ static void stats_refresh_range(HWND hListView, SYSTEMTIME *stFrom,
             stTo->wYear, stTo->wMonth, stTo->wDay);
 
     KeyStat *stats = NULL;
-    int count = db_get_date_range_stats(from, to, app, &stats);
+    int count = db_get_date_range_stats(from, to, app, 0, &stats);
     if (!stats || count == 0) return;
 
     LVITEM lvi;
@@ -690,18 +690,38 @@ static void stats_apply_theme(HWND hWnd, HWND hListView)
 {
     BOOL dark = db_get_setting_int("dark_mode", 0);
     if (dark) {
-        SetWindowTheme(hListView, L"", L"");
+        BOOL useDark = TRUE;
+        DwmSetWindowAttribute(hWnd, DWMWA_USE_IMMERSIVE_DARK_MODE,
+                              &useDark, sizeof(useDark));
+        if (g_pAllowDarkModeForWindow) {
+            g_pAllowDarkModeForWindow(hWnd, TRUE);
+            g_pAllowDarkModeForWindow(hListView, TRUE);
+        }
+        SetWindowTheme(hListView, L"DarkMode_Explorer", NULL);
         ListView_SetBkColor(hListView, RGB(37, 37, 38));
         ListView_SetTextBkColor(hListView, RGB(37, 37, 38));
         ListView_SetTextColor(hListView, RGB(212, 212, 212));
     } else {
+        BOOL useDark = FALSE;
+        DwmSetWindowAttribute(hWnd, DWMWA_USE_IMMERSIVE_DARK_MODE,
+                              &useDark, sizeof(useDark));
+        if (g_pAllowDarkModeForWindow) {
+            g_pAllowDarkModeForWindow(hWnd, FALSE);
+            g_pAllowDarkModeForWindow(hListView, FALSE);
+        }
         SetWindowTheme(hListView, L"Explorer", NULL);
         ListView_SetBkColor(hListView, RGB(255, 255, 255));
         ListView_SetTextBkColor(hListView, RGB(255, 255, 255));
         ListView_SetTextColor(hListView, RGB(0, 0, 0));
     }
+    if (g_pFlushMenuThemes) g_pFlushMenuThemes();
     if (hListView) InvalidateRect(hListView, NULL, TRUE);
-    if (hWnd) InvalidateRect(hWnd, NULL, TRUE);
+    if (hWnd) {
+        SetWindowPos(hWnd, NULL, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
+                     SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        InvalidateRect(hWnd, NULL, TRUE);
+    }
 }
 
 static void export_csv_file(HWND hParent, KeyStat *stats, int count,
@@ -928,7 +948,7 @@ static LRESULT CALLBACK StatsWndProc(HWND hWnd, UINT msg,
                             stTo.wYear, stTo.wMonth, stTo.wDay);
                     const char *app = get_selected_app(d->hAppCombo);
                     KeyStat *stats = NULL;
-                    int cnt = db_get_date_range_stats(from, to, app, &stats);
+                    int cnt = db_get_date_range_stats(from, to, app, 1, &stats);
                     if (stats && cnt > 0) {
                         export_csv_file(hWnd, stats, cnt,
                                         "ksc_stats_period.csv");
@@ -972,7 +992,7 @@ static void show_stats_window(HWND hParent)
     }
 
     HWND hDlg = CreateWindow("KSC_Stats", "KSC - Statistics",
-                 WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+                 WS_OVERLAPPEDWINDOW,
                  CW_USEDEFAULT, CW_USEDEFAULT, 710, 420,
                  hParent, NULL, g_hInst, NULL);
     ShowWindow(hDlg, SW_SHOW);
@@ -1005,10 +1025,11 @@ static void export_csv_file(HWND hParent, KeyStat *stats, int count,
         return;
     }
 
-    fprintf(f, "Key Code,Key Name,Count\n");
+    fprintf(f, "Key Code,Key Name,App,Count\n");
     for (int i = 0; i < count; i++) {
-        fprintf(f, "%d,\"%s\",%lld\n",
+        fprintf(f, "%d,\"%s\",\"%s\",%lld\n",
                 stats[i].key_code, stats[i].key_name,
+                stats[i].app,
                 (long long)stats[i].count);
     }
     fclose(f);
@@ -1019,11 +1040,23 @@ static void export_csv_file(HWND hParent, KeyStat *stats, int count,
 
 static void export_all_data(HWND hParent)
 {
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    char to[16];
+    sprintf(to, "%04d-%02d-%02d", st.wYear, st.wMonth, st.wDay);
+
     KeyStat *stats = NULL;
-    int count = db_get_stats(&stats);
+    int count = db_get_date_range_stats("2000-01-01", to, NULL, 1, &stats);
     if (!stats || count == 0) {
-        MessageBox(hParent, "No data to export.", "Export",
-                   MB_OK | MB_ICONINFORMATION);
+        KeyStat *allStats = NULL;
+        int allCount = db_get_stats(&allStats);
+        if (!allStats || allCount == 0) {
+            MessageBox(hParent, "No data to export.", "Export",
+                       MB_OK | MB_ICONINFORMATION);
+            return;
+        }
+        export_csv_file(hParent, allStats, allCount, "ksc_stats.csv");
+        db_free_stats(allStats);
         return;
     }
     export_csv_file(hParent, stats, count, "ksc_stats.csv");
