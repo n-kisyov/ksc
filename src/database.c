@@ -67,8 +67,9 @@ int db_init(void)
         "CREATE TABLE IF NOT EXISTS key_daily ("
         "key_code INTEGER NOT NULL, "
         "date TEXT NOT NULL, "
+        "app TEXT NOT NULL DEFAULT '', "
         "count INTEGER DEFAULT 0, "
-        "PRIMARY KEY (key_code, date)"
+        "PRIMARY KEY (key_code, date, app)"
         ");";
 
     char *err = NULL;
@@ -89,7 +90,7 @@ void db_close(void)
     }
 }
 
-void db_increment_key(int key_code, const char *key_name)
+void db_increment_key(int key_code, const char *key_name, const char *app)
 {
     if (!g_db) return;
 
@@ -110,16 +111,18 @@ void db_increment_key(int key_code, const char *key_name)
 
     char today[16];
     get_today_date(today, sizeof(today));
+    const char *appName = (app && app[0]) ? app : "";
     const char *dailySql =
-        "INSERT INTO key_daily (key_code, date, count) "
-        "VALUES (?1, ?2, 1) "
-        "ON CONFLICT(key_code, date) DO UPDATE SET "
+        "INSERT INTO key_daily (key_code, date, app, count) "
+        "VALUES (?1, ?2, ?3, 1) "
+        "ON CONFLICT(key_code, date, app) DO UPDATE SET "
         "count = count + 1;";
 
     sqlite3_stmt *dst = NULL;
     if (sqlite3_prepare_v2(g_db, dailySql, -1, &dst, NULL) != SQLITE_OK) return;
     sqlite3_bind_int(dst, 1, key_code);
     sqlite3_bind_text(dst, 2, today, -1, SQLITE_STATIC);
+    sqlite3_bind_text(dst, 3, appName, -1, SQLITE_STATIC);
     sqlite3_step(dst);
     sqlite3_finalize(dst);
 }
@@ -172,25 +175,28 @@ void db_free_stats(KeyStat *stats)
     free(stats);
 }
 
-int db_get_period_stats(int days, KeyStat **out_stats)
+int db_get_date_range_stats(const char *from, const char *to,
+                             const char *app, KeyStat **out_stats)
 {
-    if (!g_db || !out_stats) return 0;
+    if (!g_db || !out_stats || !from || !to) return 0;
 
-    char cutoff[16];
-    get_cutoff_date(cutoff, sizeof(cutoff), days);
-
+    const char *appFilter = (app && app[0]) ? app : "";
     const char *sql =
         "SELECT kd.key_code, kc.key_name, SUM(kd.count) "
         "FROM key_daily kd "
         "LEFT JOIN key_counts kc ON kd.key_code = kc.key_code "
-        "WHERE kd.date >= ?1 "
+        "WHERE kd.date >= ?1 AND kd.date <= ?2 "
+        "AND (?3 = '' OR kd.app = ?3) "
         "GROUP BY kd.key_code "
         "ORDER BY SUM(kd.count) DESC;";
 
     sqlite3_stmt *stmt = NULL;
-    if (sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL) != SQLITE_OK) return 0;
+    if (sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return 0;
 
-    sqlite3_bind_text(stmt, 1, cutoff, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 1, from, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, to, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 3, appFilter, -1, SQLITE_STATIC);
 
     int capacity = 64;
     int count = 0;
@@ -231,63 +237,47 @@ int db_get_period_stats(int days, KeyStat **out_stats)
     return count;
 }
 
-int db_get_date_range_stats(const char *from, const char *to,
-                             KeyStat **out_stats)
+int db_get_distinct_apps(char ***out_apps, int *out_count)
 {
-    if (!g_db || !out_stats || !from || !to) return 0;
+    if (!g_db || !out_apps || !out_count) return 0;
 
     const char *sql =
-        "SELECT kd.key_code, kc.key_name, SUM(kd.count) "
-        "FROM key_daily kd "
-        "LEFT JOIN key_counts kc ON kd.key_code = kc.key_code "
-        "WHERE kd.date >= ?1 AND kd.date <= ?2 "
-        "GROUP BY kd.key_code "
-        "ORDER BY SUM(kd.count) DESC;";
-
+        "SELECT DISTINCT app FROM key_daily WHERE app != '' ORDER BY app ASC;";
     sqlite3_stmt *stmt = NULL;
     if (sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL) != SQLITE_OK)
         return 0;
 
-    sqlite3_bind_text(stmt, 1, from, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 2, to, -1, SQLITE_STATIC);
-
-    int capacity = 64;
-    int count = 0;
-    KeyStat *stats = malloc(sizeof(KeyStat) * capacity);
-    if (!stats) {
-        sqlite3_finalize(stmt);
-        return 0;
-    }
+    int cap = 16, cnt = 0;
+    char **apps = malloc(sizeof(char *) * cap);
+    if (!apps) { sqlite3_finalize(stmt); return 0; }
 
     while (sqlite3_step(stmt) == SQLITE_ROW) {
-        if (count >= capacity) {
-            capacity *= 2;
-            KeyStat *tmp = realloc(stats, sizeof(KeyStat) * capacity);
+        if (cnt >= cap) {
+            cap *= 2;
+            char **tmp = realloc(apps, sizeof(char *) * cap);
             if (!tmp) {
-                free(stats);
+                for (int i = 0; i < cnt; i++) free(apps[i]);
+                free(apps);
                 sqlite3_finalize(stmt);
                 return 0;
             }
-            stats = tmp;
+            apps = tmp;
         }
-
-        stats[count].key_code = sqlite3_column_int(stmt, 0);
-        const char *name = (const char *)sqlite3_column_text(stmt, 1);
-        if (name) {
-            strncpy(stats[count].key_name, name, 63);
-        } else {
-            char buf[16];
-            sprintf(buf, "Key 0x%02X", stats[count].key_code);
-            strncpy(stats[count].key_name, buf, 63);
-        }
-        stats[count].key_name[63] = '\0';
-        stats[count].count = sqlite3_column_int64(stmt, 2);
-        count++;
+        const char *name = (const char *)sqlite3_column_text(stmt, 0);
+        apps[cnt] = name ? _strdup(name) : NULL;
+        cnt++;
     }
-
     sqlite3_finalize(stmt);
-    *out_stats = stats;
-    return count;
+    *out_apps = apps;
+    *out_count = cnt;
+    return 1;
+}
+
+void db_free_apps(char **apps, int count)
+{
+    if (!apps) return;
+    for (int i = 0; i < count; i++) free(apps[i]);
+    free(apps);
 }
 
 int db_get_setting_int(const char *key, int default_val)

@@ -11,6 +11,7 @@
 #include <commctrl.h>
 #include <uxtheme.h>
 #include <dwmapi.h>
+#include <commdlg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,6 +32,7 @@
 #define IDM_ABOUT              1005
 #define IDM_HEATMAP            1006
 #define IDM_STATS              1007
+#define IDM_EXPORT_CSV         1008
 
 #define IDC_LISTVIEW           2001
 #define IDC_STARTUP_CHK         2002
@@ -40,6 +42,8 @@
 #define IDC_DATE_FROM           2007
 #define IDC_DATE_TO             2008
 #define IDC_STATS_REFRESH_BTN   2009
+#define IDC_EXPORT_BTN          2010
+#define IDC_APP_COMBO           2011
 
 #define ID_TIMER_REFRESH 1
 

@@ -140,7 +140,10 @@ static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam,
         KBDLLHOOKSTRUCT *p = (KBDLLHOOKSTRUCT *)lParam;
         if (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN) {
             const char *name = keyhook_get_name(p->vkCode);
-            db_increment_key(p->vkCode, name);
+            char app[256] = "";
+            HWND hFg = GetForegroundWindow();
+            if (hFg) GetWindowText(hFg, app, sizeof(app));
+            db_increment_key(p->vkCode, name, app);
         }
     }
     return CallNextHookEx(NULL, nCode, wParam, lParam);
@@ -152,9 +155,15 @@ static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam,
     if (nCode == HC_ACTION) {
         (void)lParam;
         if (wParam == WM_LBUTTONDOWN) {
-            db_increment_key(VK_LBUTTON, keyhook_get_name(VK_LBUTTON));
+            char app[256] = "";
+            HWND hFg = GetForegroundWindow();
+            if (hFg) GetWindowText(hFg, app, sizeof(app));
+            db_increment_key(VK_LBUTTON, keyhook_get_name(VK_LBUTTON), app);
         } else if (wParam == WM_RBUTTONDOWN) {
-            db_increment_key(VK_RBUTTON, keyhook_get_name(VK_RBUTTON));
+            char app[256] = "";
+            HWND hFg = GetForegroundWindow();
+            if (hFg) GetWindowText(hFg, app, sizeof(app));
+            db_increment_key(VK_RBUTTON, keyhook_get_name(VK_RBUTTON), app);
         }
     }
     return CallNextHookEx(NULL, nCode, wParam, lParam);

@@ -170,7 +170,7 @@ if (Test-Path "build\ksc.exe") {
     # Self-sign the executable
     Write-Host ""
     Write-Host "[INFO] Signing executable..."
-    $certSubject = "CN=bbounce.org KSC"
+    $certSubject = "CN=bbounce.org ksc 0.9"
     $cert = Get-ChildItem -Path Cert:\CurrentUser\My -CodeSigningCert |
             Where-Object { $_.Subject -eq $certSubject } |
             Select-Object -First 1
@@ -181,7 +181,7 @@ if (Test-Path "build\ksc.exe") {
                 -Subject $certSubject `
                 -KeyUsage DigitalSignature `
                 -CertStoreLocation Cert:\CurrentUser\My `
-                -FriendlyName "KSC Signing Certificate"
+                -FriendlyName "ksc Signing Certificate"
             Write-Host "[OK] Created self-signed code-signing certificate."
         } catch {
             Write-Host "[WARN] Could not create signing certificate: $($_.Exception.Message)"
@@ -194,14 +194,12 @@ if (Test-Path "build\ksc.exe") {
             Write-Host "[OK] Executable signed."
 
             $certFile = Join-Path $PSScriptRoot "ksc.cer"
-            if (-not (Test-Path $certFile)) {
-                Export-Certificate -Cert $cert -FilePath $certFile -Type CERT | Out-Null
-                Write-Host "[INFO] Public certificate exported to ksc.cer"
-                Write-Host ""
-                Write-Host "  To permanently trust this build, run once (as Admin):"
-                Write-Host "    Import-Certificate -FilePath .\ksc.cer -CertStoreLocation Cert:\CurrentUser\TrustedPublisher"
-                Write-Host ""
-            }
+            Export-Certificate -Cert $cert -FilePath $certFile -Type CERT -Force | Out-Null
+            Write-Host "[INFO] Public certificate exported to ksc.cer"
+            Write-Host ""
+            Write-Host "  To permanently trust this build, run once (as Admin):"
+            Write-Host "    Import-Certificate -FilePath .\ksc.cer -CertStoreLocation Cert:\CurrentUser\TrustedPublisher"
+            Write-Host ""
         } catch {
             Write-Host "[WARN] Signing failed: $($_.Exception.Message)"
             Write-Host "[WARN] The exe is unsigned. Right-click Properties > Unblock to run."

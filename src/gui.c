@@ -624,10 +624,11 @@ typedef struct {
     HWND hListView;
     HWND hDateFrom;
     HWND hDateTo;
+    HWND hAppCombo;
 } StatsWinData;
 
 static void stats_refresh_range(HWND hListView, SYSTEMTIME *stFrom,
-                                 SYSTEMTIME *stTo)
+                                 SYSTEMTIME *stTo, const char *app)
 {
     if (!hListView || !stFrom || !stTo) return;
     ListView_DeleteAllItems(hListView);
@@ -639,7 +640,7 @@ static void stats_refresh_range(HWND hListView, SYSTEMTIME *stFrom,
             stTo->wYear, stTo->wMonth, stTo->wDay);
 
     KeyStat *stats = NULL;
-    int count = db_get_date_range_stats(from, to, &stats);
+    int count = db_get_date_range_stats(from, to, app, &stats);
     if (!stats || count == 0) return;
 
     LVITEM lvi;
@@ -660,6 +661,31 @@ static void stats_refresh_range(HWND hListView, SYSTEMTIME *stFrom,
     db_free_stats(stats);
 }
 
+static void populate_app_combo(HWND hCombo)
+{
+    SendMessage(hCombo, CB_RESETCONTENT, 0, 0);
+    SendMessage(hCombo, CB_ADDSTRING, 0, (LPARAM)"All apps");
+    char **apps = NULL;
+    int nApps = 0;
+    if (db_get_distinct_apps(&apps, &nApps)) {
+        for (int i = 0; i < nApps; i++) {
+            SendMessage(hCombo, CB_ADDSTRING, 0, (LPARAM)apps[i]);
+        }
+        db_free_apps(apps, nApps);
+    }
+    SendMessage(hCombo, CB_SETCURSEL, 0, 0);
+}
+
+static const char *get_selected_app(HWND hCombo)
+{
+    int sel = (int)SendMessage(hCombo, CB_GETCURSEL, 0, 0);
+    if (sel <= 0) return NULL;
+    static char buf[256];
+    buf[0] = '\0';
+    SendMessage(hCombo, CB_GETLBTEXT, sel, (LPARAM)buf);
+    return buf[0] ? buf : NULL;
+}
+
 static void stats_apply_theme(HWND hWnd, HWND hListView)
 {
     BOOL dark = db_get_setting_int("dark_mode", 0);
@@ -677,6 +703,9 @@ static void stats_apply_theme(HWND hWnd, HWND hListView)
     if (hListView) InvalidateRect(hListView, NULL, TRUE);
     if (hWnd) InvalidateRect(hWnd, NULL, TRUE);
 }
+
+static void export_csv_file(HWND hParent, KeyStat *stats, int count,
+                             const char *defaultName);
 
 static LRESULT CALLBACK StatsWndProc(HWND hWnd, UINT msg,
                                       WPARAM wParam, LPARAM lParam)
@@ -696,24 +725,40 @@ static LRESULT CALLBACK StatsWndProc(HWND hWnd, UINT msg,
 
         HWND hFrom = CreateWindow(DATETIMEPICK_CLASS, "",
                        WS_CHILD | WS_VISIBLE | DTS_SHORTDATECENTURYFORMAT,
-                       50, yTop, 130, dph,
+                       50, yTop, 110, dph,
                        hWnd, (HMENU)IDC_DATE_FROM, g_hInst, NULL);
         data->hDateFrom = hFrom;
 
         CreateWindow(WC_STATIC, "To:",
                      WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
-                     195, yTop, 22, dph, hWnd, NULL, g_hInst, NULL);
+                     170, yTop, 22, dph, hWnd, NULL, g_hInst, NULL);
 
         HWND hTo = CreateWindow(DATETIMEPICK_CLASS, "",
                      WS_CHILD | WS_VISIBLE | DTS_SHORTDATECENTURYFORMAT,
-                     222, yTop, 130, dph,
+                     196, yTop, 110, dph,
                      hWnd, (HMENU)IDC_DATE_TO, g_hInst, NULL);
         data->hDateTo = hTo;
 
+        CreateWindow(WC_STATIC, "App:",
+                     WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
+                     316, yTop, 30, dph, hWnd, NULL, g_hInst, NULL);
+
+        HWND hApp = CreateWindow(WC_COMBOBOX, "",
+                     WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
+                     350, yTop, 120, 300,
+                     hWnd, (HMENU)IDC_APP_COMBO, g_hInst, NULL);
+        data->hAppCombo = hApp;
+        populate_app_combo(hApp);
+
         CreateWindow(WC_BUTTON, "Refresh",
                      WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                     366, yTop - 1, 70, dph + 2,
+                     480, yTop - 1, 60, dph + 2,
                      hWnd, (HMENU)IDC_STATS_REFRESH_BTN, g_hInst, NULL);
+
+        CreateWindow(WC_BUTTON, "Export CSV",
+                     WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                     546, yTop - 1, 72, dph + 2,
+                     hWnd, (HMENU)IDC_EXPORT_BTN, g_hInst, NULL);
 
         SYSTEMTIME stEnd, stStart;
         GetLocalTime(&stEnd);
@@ -773,7 +818,7 @@ static LRESULT CALLBACK StatsWndProc(HWND hWnd, UINT msg,
                      SWP_NOZORDER);
 
         stats_apply_theme(hWnd, hLv);
-        stats_refresh_range(hLv, &stMonthAgo, &stEnd);
+        stats_refresh_range(hLv, &stMonthAgo, &stEnd, NULL);
         return 0;
     }
 
@@ -846,7 +891,52 @@ static LRESULT CALLBACK StatsWndProc(HWND hWnd, UINT msg,
                 LRESULT rTo = SendMessage(d->hDateTo,
                     DTM_GETSYSTEMTIME, 0, (LPARAM)&stTo);
                 if (rFrom == GDT_VALID && rTo == GDT_VALID) {
-                    stats_refresh_range(d->hListView, &stFrom, &stTo);
+                    const char *app = get_selected_app(d->hAppCombo);
+                    stats_refresh_range(d->hListView, &stFrom, &stTo, app);
+                }
+            }
+        } else if (LOWORD(wParam) == IDC_APP_COMBO &&
+                   HIWORD(wParam) == CBN_SELCHANGE) {
+            StatsWinData *d = (StatsWinData *)GetWindowLongPtr(
+                hWnd, GWLP_USERDATA);
+            if (d) {
+                SYSTEMTIME stFrom, stTo;
+                LRESULT rFrom = SendMessage(d->hDateFrom,
+                    DTM_GETSYSTEMTIME, 0, (LPARAM)&stFrom);
+                LRESULT rTo = SendMessage(d->hDateTo,
+                    DTM_GETSYSTEMTIME, 0, (LPARAM)&stTo);
+                if (rFrom == GDT_VALID && rTo == GDT_VALID) {
+                    const char *app = get_selected_app(d->hAppCombo);
+                    stats_refresh_range(d->hListView, &stFrom, &stTo, app);
+                }
+            }
+        } else if (LOWORD(wParam) == IDC_EXPORT_BTN &&
+                   HIWORD(wParam) == BN_CLICKED) {
+            StatsWinData *d = (StatsWinData *)GetWindowLongPtr(
+                hWnd, GWLP_USERDATA);
+            if (d) {
+                SYSTEMTIME stFrom, stTo;
+                LRESULT rFrom = SendMessage(d->hDateFrom,
+                    DTM_GETSYSTEMTIME, 0, (LPARAM)&stFrom);
+                LRESULT rTo = SendMessage(d->hDateTo,
+                    DTM_GETSYSTEMTIME, 0, (LPARAM)&stTo);
+                if (rFrom == GDT_VALID && rTo == GDT_VALID) {
+                    char from[16], to[16];
+                    sprintf(from, "%04d-%02d-%02d",
+                            stFrom.wYear, stFrom.wMonth, stFrom.wDay);
+                    sprintf(to, "%04d-%02d-%02d",
+                            stTo.wYear, stTo.wMonth, stTo.wDay);
+                    const char *app = get_selected_app(d->hAppCombo);
+                    KeyStat *stats = NULL;
+                    int cnt = db_get_date_range_stats(from, to, app, &stats);
+                    if (stats && cnt > 0) {
+                        export_csv_file(hWnd, stats, cnt,
+                                        "ksc_stats_period.csv");
+                        db_free_stats(stats);
+                    } else {
+                        MessageBox(hWnd, "No data in selected range.",
+                                   "Export", MB_OK | MB_ICONINFORMATION);
+                    }
                 }
             }
         }
@@ -883,10 +973,61 @@ static void show_stats_window(HWND hParent)
 
     HWND hDlg = CreateWindow("KSC_Stats", "KSC - Statistics",
                  WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
-                 CW_USEDEFAULT, CW_USEDEFAULT, 580, 420,
+                 CW_USEDEFAULT, CW_USEDEFAULT, 710, 420,
                  hParent, NULL, g_hInst, NULL);
     ShowWindow(hDlg, SW_SHOW);
     UpdateWindow(hDlg);
+}
+
+static void export_csv_file(HWND hParent, KeyStat *stats, int count,
+                             const char *defaultName)
+{
+    OPENFILENAME ofn;
+    char filePath[MAX_PATH] = "";
+    if (defaultName && defaultName[0])
+        strcpy(filePath, defaultName);
+
+    ZeroMemory(&ofn, sizeof(ofn));
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = hParent;
+    ofn.lpstrFilter = "CSV Files (*.csv)\0*.csv\0\0";
+    ofn.lpstrFile = filePath;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrDefExt = "csv";
+    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
+
+    if (!GetSaveFileName(&ofn)) return;
+
+    FILE *f = fopen(filePath, "w");
+    if (!f) {
+        MessageBox(hParent, "Failed to create file.", "Export Error",
+                   MB_OK | MB_ICONERROR);
+        return;
+    }
+
+    fprintf(f, "Key Code,Key Name,Count\n");
+    for (int i = 0; i < count; i++) {
+        fprintf(f, "%d,\"%s\",%lld\n",
+                stats[i].key_code, stats[i].key_name,
+                (long long)stats[i].count);
+    }
+    fclose(f);
+
+    MessageBox(hParent, "Exported successfully.", "Export",
+               MB_OK | MB_ICONINFORMATION);
+}
+
+static void export_all_data(HWND hParent)
+{
+    KeyStat *stats = NULL;
+    int count = db_get_stats(&stats);
+    if (!stats || count == 0) {
+        MessageBox(hParent, "No data to export.", "Export",
+                   MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    export_csv_file(hParent, stats, count, "ksc_stats.csv");
+    db_free_stats(stats);
 }
 
 static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg,
@@ -927,6 +1068,7 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg,
         AppendMenu(hFileMenu, MF_STRING, IDM_SETTINGS, "Settings");
         AppendMenu(hFileMenu, MF_STRING, IDM_HEATMAP, "Key Heatmap");
         AppendMenu(hFileMenu, MF_STRING, IDM_STATS, "Stats");
+        AppendMenu(hFileMenu, MF_STRING, IDM_EXPORT_CSV, "Export Data...");
         AppendMenu(hFileMenu, MF_SEPARATOR, 0, NULL);
         AppendMenu(hFileMenu, MF_STRING, IDM_QUIT, "Quit");
         AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hFileMenu, "File");
@@ -1016,7 +1158,7 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg,
             if (IsWindowVisible(hWnd)) {
                 ShowWindow(hWnd, SW_HIDE);
             } else {
-                ShowWindow(hWnd, SW_SHOW);
+                ShowWindow(hWnd, SW_RESTORE);
                 SetForegroundWindow(hWnd);
             }
             return 0;
@@ -1032,7 +1174,7 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg,
             if (IsWindowVisible(hWnd)) {
                 ShowWindow(hWnd, SW_HIDE);
             } else {
-                ShowWindow(hWnd, SW_SHOW);
+                ShowWindow(hWnd, SW_RESTORE);
                 SetForegroundWindow(hWnd);
             }
             break;
@@ -1045,6 +1187,9 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg,
         case IDM_STATS:
             show_stats_window(hWnd);
             break;
+        case IDM_EXPORT_CSV:
+            export_all_data(hWnd);
+            break;
         case IDM_REFRESH:
             refresh_list_view();
             break;
@@ -1053,11 +1198,11 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg,
             break;
         case IDM_ABOUT:
             MessageBox(hWnd,
-                "KSC - Keystroke Counter v1.0\n\n"
+                "ksc - Keystroke Counter v0.9\n\n"
                 "Counts every keystroke on your keyboard.\n"
                 "Stores counts in a SQLite database.\n\n"
                 "Built for Windows 11 with MinGW/GCC.",
-                "About KSC", MB_OK | MB_ICONINFORMATION);
+                "About ksc", MB_OK | MB_ICONINFORMATION);
             break;
         }
         return 0;

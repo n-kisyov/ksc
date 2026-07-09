@@ -39,4 +39,5 @@ target_link_libraries(ksc PRIVATE
     advapi32
     uxtheme
     dwmapi
+    comdlg32
 )
