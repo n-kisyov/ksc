@@ -30,12 +30,16 @@
 #define IDM_REFRESH            1004
 #define IDM_ABOUT              1005
 #define IDM_HEATMAP            1006
+#define IDM_STATS              1007
 
 #define IDC_LISTVIEW           2001
 #define IDC_STARTUP_CHK         2002
 #define IDC_START_MINIMIZED_CHK 2003
 #define IDC_DARK_MODE_CHK       2004
 #define IDC_AUTO_REFRESH_CHK    2005
+#define IDC_DATE_FROM           2007
+#define IDC_DATE_TO             2008
+#define IDC_STATS_REFRESH_BTN   2009
 
 #define ID_TIMER_REFRESH 1
 

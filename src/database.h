@@ -13,6 +13,8 @@ int db_init(void);
 void db_close(void);
 void db_increment_key(int key_code, const char *key_name);
 int db_get_stats(KeyStat **out_stats);
+int db_get_period_stats(int days, KeyStat **out_stats);
+int db_get_date_range_stats(const char *from, const char *to, KeyStat **out_stats);
 void db_free_stats(KeyStat *stats);
 
 int  db_get_setting_int(const char *key, int default_val);

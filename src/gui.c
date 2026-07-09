@@ -317,6 +317,7 @@ static void show_settings(HWND hParent)
         WNDCLASS wc = {0};
         wc.lpfnWndProc = SettingsWndProc;
         wc.hInstance = g_hInst;
+        wc.hIcon = g_hAppIcon;
         wc.hCursor = LoadCursor(NULL, IDC_ARROW);
         wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
         wc.lpszClassName = "KSC_Settings";
@@ -603,6 +604,7 @@ static void show_heatmap(HWND hParent)
         WNDCLASS wc = {0};
         wc.lpfnWndProc = HeatmapWndProc;
         wc.hInstance = g_hInst;
+        wc.hIcon = g_hAppIcon;
         wc.hCursor = LoadCursor(NULL, IDC_ARROW);
         wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
         wc.lpszClassName = "KSC_Heatmap";
@@ -613,6 +615,275 @@ static void show_heatmap(HWND hParent)
     HWND hDlg = CreateWindow("KSC_Heatmap", "KSC - Key Heatmap",
                  WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
                  CW_USEDEFAULT, CW_USEDEFAULT, 708, 330,
+                 hParent, NULL, g_hInst, NULL);
+    ShowWindow(hDlg, SW_SHOW);
+    UpdateWindow(hDlg);
+}
+
+typedef struct {
+    HWND hListView;
+    HWND hDateFrom;
+    HWND hDateTo;
+} StatsWinData;
+
+static void stats_refresh_range(HWND hListView, SYSTEMTIME *stFrom,
+                                 SYSTEMTIME *stTo)
+{
+    if (!hListView || !stFrom || !stTo) return;
+    ListView_DeleteAllItems(hListView);
+
+    char from[16], to[16];
+    sprintf(from, "%04d-%02d-%02d",
+            stFrom->wYear, stFrom->wMonth, stFrom->wDay);
+    sprintf(to, "%04d-%02d-%02d",
+            stTo->wYear, stTo->wMonth, stTo->wDay);
+
+    KeyStat *stats = NULL;
+    int count = db_get_date_range_stats(from, to, &stats);
+    if (!stats || count == 0) return;
+
+    LVITEM lvi;
+    memset(&lvi, 0, sizeof(lvi));
+    lvi.mask = LVIF_TEXT;
+
+    for (int i = 0; i < count; i++) {
+        lvi.iItem = i;
+        lvi.iSubItem = 0;
+        lvi.pszText = stats[i].key_name;
+        ListView_InsertItem(hListView, &lvi);
+
+        char cnt[32];
+        sprintf(cnt, "%lld", (long long)stats[i].count);
+        ListView_SetItemText(hListView, i, 1, cnt);
+    }
+
+    db_free_stats(stats);
+}
+
+static void stats_apply_theme(HWND hWnd, HWND hListView)
+{
+    BOOL dark = db_get_setting_int("dark_mode", 0);
+    if (dark) {
+        SetWindowTheme(hListView, L"", L"");
+        ListView_SetBkColor(hListView, RGB(37, 37, 38));
+        ListView_SetTextBkColor(hListView, RGB(37, 37, 38));
+        ListView_SetTextColor(hListView, RGB(212, 212, 212));
+    } else {
+        SetWindowTheme(hListView, L"Explorer", NULL);
+        ListView_SetBkColor(hListView, RGB(255, 255, 255));
+        ListView_SetTextBkColor(hListView, RGB(255, 255, 255));
+        ListView_SetTextColor(hListView, RGB(0, 0, 0));
+    }
+    if (hListView) InvalidateRect(hListView, NULL, TRUE);
+    if (hWnd) InvalidateRect(hWnd, NULL, TRUE);
+}
+
+static LRESULT CALLBACK StatsWndProc(HWND hWnd, UINT msg,
+                                      WPARAM wParam, LPARAM lParam)
+{
+    switch (msg) {
+    case WM_CREATE: {
+        StatsWinData *data = malloc(sizeof(StatsWinData));
+        if (!data) return -1;
+        memset(data, 0, sizeof(*data));
+
+        int yTop = 10;
+        int dph = 22;
+
+        CreateWindow(WC_STATIC, "From:",
+                     WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
+                     10, yTop, 38, dph, hWnd, NULL, g_hInst, NULL);
+
+        HWND hFrom = CreateWindow(DATETIMEPICK_CLASS, "",
+                       WS_CHILD | WS_VISIBLE | DTS_SHORTDATECENTURYFORMAT,
+                       50, yTop, 130, dph,
+                       hWnd, (HMENU)IDC_DATE_FROM, g_hInst, NULL);
+        data->hDateFrom = hFrom;
+
+        CreateWindow(WC_STATIC, "To:",
+                     WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
+                     195, yTop, 22, dph, hWnd, NULL, g_hInst, NULL);
+
+        HWND hTo = CreateWindow(DATETIMEPICK_CLASS, "",
+                     WS_CHILD | WS_VISIBLE | DTS_SHORTDATECENTURYFORMAT,
+                     222, yTop, 130, dph,
+                     hWnd, (HMENU)IDC_DATE_TO, g_hInst, NULL);
+        data->hDateTo = hTo;
+
+        CreateWindow(WC_BUTTON, "Refresh",
+                     WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                     366, yTop - 1, 70, dph + 2,
+                     hWnd, (HMENU)IDC_STATS_REFRESH_BTN, g_hInst, NULL);
+
+        SYSTEMTIME stEnd, stStart;
+        GetLocalTime(&stEnd);
+        stStart = stEnd;
+
+        if (stStart.wDay > 1) {
+            stStart.wDay--;
+        } else {
+            stStart.wMonth--;
+            if (stStart.wMonth == 0) {
+                stStart.wMonth = 12;
+                stStart.wYear--;
+            }
+            SYSTEMTIME stTmp = stStart;
+            stTmp.wDay = 28;
+            FILETIME ft;
+            SystemTimeToFileTime(&stTmp, &ft);
+            FileTimeToSystemTime(&ft, &stTmp);
+            stStart.wDay = stTmp.wDay;
+        }
+        SYSTEMTIME stMonthAgo = stEnd;
+        if (stMonthAgo.wMonth > 1)
+            stMonthAgo.wMonth--;
+        else { stMonthAgo.wMonth = 12; stMonthAgo.wYear--; }
+
+        SendMessage(hFrom, DTM_SETSYSTEMTIME, GDT_VALID,
+                    (LPARAM)&stMonthAgo);
+        SendMessage(hTo, DTM_SETSYSTEMTIME, GDT_VALID,
+                    (LPARAM)&stEnd);
+
+        HWND hLv = CreateWindow(WC_LISTVIEW, "",
+                    WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL,
+                    0, 44, 10, 10,
+                    hWnd, (HMENU)IDC_LISTVIEW, g_hInst, NULL);
+
+        ListView_SetExtendedListViewStyle(hLv,
+            LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER);
+
+        LVCOLUMN lvc;
+        memset(&lvc, 0, sizeof(lvc));
+        lvc.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
+        lvc.cx = 280;
+        lvc.pszText = "Key";
+        lvc.iSubItem = 0;
+        ListView_InsertColumn(hLv, 0, &lvc);
+        lvc.cx = 100;
+        lvc.pszText = "Count";
+        lvc.iSubItem = 1;
+        ListView_InsertColumn(hLv, 1, &lvc);
+
+        data->hListView = hLv;
+        SetWindowLongPtr(hWnd, GWLP_USERDATA, (LONG_PTR)data);
+
+        RECT rc;
+        GetClientRect(hWnd, &rc);
+        SetWindowPos(hLv, NULL, 0, 44, rc.right, rc.bottom - 44,
+                     SWP_NOZORDER);
+
+        stats_apply_theme(hWnd, hLv);
+        stats_refresh_range(hLv, &stMonthAgo, &stEnd);
+        return 0;
+    }
+
+    case WM_SIZE: {
+        StatsWinData *d = (StatsWinData *)GetWindowLongPtr(
+            hWnd, GWLP_USERDATA);
+        if (d && d->hListView) {
+            RECT rc;
+            GetClientRect(hWnd, &rc);
+            SetWindowPos(d->hListView, NULL, 0, 44,
+                         rc.right, rc.bottom - 44, SWP_NOZORDER);
+        }
+        return 0;
+    }
+
+    case WM_ERASEBKGND: {
+        BOOL dark = db_get_setting_int("dark_mode", 0);
+        if (dark && g_hDarkBrush) {
+            RECT rc;
+            GetClientRect(hWnd, &rc);
+            FillRect((HDC)wParam, &rc, g_hDarkBrush);
+            return TRUE;
+        }
+        return DefWindowProc(hWnd, msg, wParam, lParam);
+    }
+
+    case WM_CTLCOLORBTN:
+    case WM_CTLCOLORSTATIC: {
+        BOOL dark = db_get_setting_int("dark_mode", 0);
+        if (dark && g_hDarkBrush) {
+            HDC hdc = (HDC)wParam;
+            SetBkMode(hdc, TRANSPARENT);
+            SetTextColor(hdc, RGB(230, 230, 230));
+            return (LRESULT)g_hDarkBrush;
+        }
+        return DefWindowProc(hWnd, msg, wParam, lParam);
+    }
+
+    case WM_NOTIFY: {
+        NMHDR *nmh = (NMHDR *)lParam;
+        if (nmh->idFrom == IDC_LISTVIEW && nmh->code == NM_CUSTOMDRAW) {
+            BOOL dark = db_get_setting_int("dark_mode", 0);
+            if (dark) {
+                NMLVCUSTOMDRAW *lvcd = (NMLVCUSTOMDRAW *)lParam;
+                switch (lvcd->nmcd.dwDrawStage) {
+                case CDDS_PREPAINT:
+                    SetWindowLongPtr(hWnd, DWLP_MSGRESULT,
+                                     CDRF_NOTIFYITEMDRAW);
+                    return TRUE;
+                case CDDS_ITEMPREPAINT:
+                    lvcd->clrText   = RGB(212, 212, 212);
+                    lvcd->clrTextBk = RGB(37, 37, 38);
+                    SetWindowLongPtr(hWnd, DWLP_MSGRESULT, CDRF_NEWFONT);
+                    return TRUE;
+                }
+            }
+        }
+        break;
+    }
+
+    case WM_COMMAND:
+        if (LOWORD(wParam) == IDC_STATS_REFRESH_BTN &&
+            HIWORD(wParam) == BN_CLICKED) {
+            StatsWinData *d = (StatsWinData *)GetWindowLongPtr(
+                hWnd, GWLP_USERDATA);
+            if (d) {
+                SYSTEMTIME stFrom, stTo;
+                LRESULT rFrom = SendMessage(d->hDateFrom,
+                    DTM_GETSYSTEMTIME, 0, (LPARAM)&stFrom);
+                LRESULT rTo = SendMessage(d->hDateTo,
+                    DTM_GETSYSTEMTIME, 0, (LPARAM)&stTo);
+                if (rFrom == GDT_VALID && rTo == GDT_VALID) {
+                    stats_refresh_range(d->hListView, &stFrom, &stTo);
+                }
+            }
+        }
+        break;
+
+    case WM_CLOSE:
+        DestroyWindow(hWnd);
+        return 0;
+
+    case WM_DESTROY: {
+        StatsWinData *d = (StatsWinData *)GetWindowLongPtr(
+            hWnd, GWLP_USERDATA);
+        if (d) free(d);
+        return 0;
+    }
+    }
+    return DefWindowProc(hWnd, msg, wParam, lParam);
+}
+
+static void show_stats_window(HWND hParent)
+{
+    static BOOL registered = FALSE;
+    if (!registered) {
+        WNDCLASS wc = {0};
+        wc.lpfnWndProc = StatsWndProc;
+        wc.hInstance = g_hInst;
+        wc.hIcon = g_hAppIcon;
+        wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+        wc.lpszClassName = "KSC_Stats";
+        RegisterClass(&wc);
+        registered = TRUE;
+    }
+
+    HWND hDlg = CreateWindow("KSC_Stats", "KSC - Statistics",
+                 WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+                 CW_USEDEFAULT, CW_USEDEFAULT, 580, 420,
                  hParent, NULL, g_hInst, NULL);
     ShowWindow(hDlg, SW_SHOW);
     UpdateWindow(hDlg);
@@ -655,6 +926,7 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg,
         HMENU hFileMenu = CreatePopupMenu();
         AppendMenu(hFileMenu, MF_STRING, IDM_SETTINGS, "Settings");
         AppendMenu(hFileMenu, MF_STRING, IDM_HEATMAP, "Key Heatmap");
+        AppendMenu(hFileMenu, MF_STRING, IDM_STATS, "Stats");
         AppendMenu(hFileMenu, MF_SEPARATOR, 0, NULL);
         AppendMenu(hFileMenu, MF_STRING, IDM_QUIT, "Quit");
         AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hFileMenu, "File");
@@ -769,6 +1041,9 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg,
             break;
         case IDM_HEATMAP:
             show_heatmap(hWnd);
+            break;
+        case IDM_STATS:
+            show_stats_window(hWnd);
             break;
         case IDM_REFRESH:
             refresh_list_view();

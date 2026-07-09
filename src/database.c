@@ -4,6 +4,28 @@
 
 static sqlite3 *g_db = NULL;
 
+static void get_today_date(char *buf, int bufsize)
+{
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    sprintf(buf, "%04d-%02d-%02d", st.wYear, st.wMonth, st.wDay);
+}
+
+static void get_cutoff_date(char *buf, int bufsize, int days_back)
+{
+    FILETIME ft;
+    GetSystemTimeAsFileTime(&ft);
+    ULARGE_INTEGER uli;
+    uli.LowPart = ft.dwLowDateTime;
+    uli.HighPart = ft.dwHighDateTime;
+    uli.QuadPart -= (ULONGLONG)days_back * 24ULL * 60ULL * 60ULL * 10000000ULL;
+    ft.dwLowDateTime = uli.LowPart;
+    ft.dwHighDateTime = uli.HighPart;
+    SYSTEMTIME st;
+    FileTimeToSystemTime(&ft, &st);
+    sprintf(buf, "%04d-%02d-%02d", st.wYear, st.wMonth, st.wDay);
+}
+
 static void ensure_db_dir(void)
 {
     char appdata[MAX_PATH];
@@ -40,6 +62,13 @@ int db_init(void)
         "CREATE TABLE IF NOT EXISTS settings ("
         "key TEXT PRIMARY KEY, "
         "value TEXT NOT NULL"
+        ");"
+
+        "CREATE TABLE IF NOT EXISTS key_daily ("
+        "key_code INTEGER NOT NULL, "
+        "date TEXT NOT NULL, "
+        "count INTEGER DEFAULT 0, "
+        "PRIMARY KEY (key_code, date)"
         ");";
 
     char *err = NULL;
@@ -78,6 +107,21 @@ void db_increment_key(int key_code, const char *key_name)
     sqlite3_bind_text(stmt, 3, key_name, -1, SQLITE_STATIC);
     sqlite3_step(stmt);
     sqlite3_finalize(stmt);
+
+    char today[16];
+    get_today_date(today, sizeof(today));
+    const char *dailySql =
+        "INSERT INTO key_daily (key_code, date, count) "
+        "VALUES (?1, ?2, 1) "
+        "ON CONFLICT(key_code, date) DO UPDATE SET "
+        "count = count + 1;";
+
+    sqlite3_stmt *dst = NULL;
+    if (sqlite3_prepare_v2(g_db, dailySql, -1, &dst, NULL) != SQLITE_OK) return;
+    sqlite3_bind_int(dst, 1, key_code);
+    sqlite3_bind_text(dst, 2, today, -1, SQLITE_STATIC);
+    sqlite3_step(dst);
+    sqlite3_finalize(dst);
 }
 
 int db_get_stats(KeyStat **out_stats)
@@ -126,6 +170,124 @@ int db_get_stats(KeyStat **out_stats)
 void db_free_stats(KeyStat *stats)
 {
     free(stats);
+}
+
+int db_get_period_stats(int days, KeyStat **out_stats)
+{
+    if (!g_db || !out_stats) return 0;
+
+    char cutoff[16];
+    get_cutoff_date(cutoff, sizeof(cutoff), days);
+
+    const char *sql =
+        "SELECT kd.key_code, kc.key_name, SUM(kd.count) "
+        "FROM key_daily kd "
+        "LEFT JOIN key_counts kc ON kd.key_code = kc.key_code "
+        "WHERE kd.date >= ?1 "
+        "GROUP BY kd.key_code "
+        "ORDER BY SUM(kd.count) DESC;";
+
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL) != SQLITE_OK) return 0;
+
+    sqlite3_bind_text(stmt, 1, cutoff, -1, SQLITE_STATIC);
+
+    int capacity = 64;
+    int count = 0;
+    KeyStat *stats = malloc(sizeof(KeyStat) * capacity);
+    if (!stats) {
+        sqlite3_finalize(stmt);
+        return 0;
+    }
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        if (count >= capacity) {
+            capacity *= 2;
+            KeyStat *tmp = realloc(stats, sizeof(KeyStat) * capacity);
+            if (!tmp) {
+                free(stats);
+                sqlite3_finalize(stmt);
+                return 0;
+            }
+            stats = tmp;
+        }
+
+        stats[count].key_code = sqlite3_column_int(stmt, 0);
+        const char *name = (const char *)sqlite3_column_text(stmt, 1);
+        if (name) {
+            strncpy(stats[count].key_name, name, 63);
+        } else {
+            char buf[16];
+            sprintf(buf, "Key 0x%02X", stats[count].key_code);
+            strncpy(stats[count].key_name, buf, 63);
+        }
+        stats[count].key_name[63] = '\0';
+        stats[count].count = sqlite3_column_int64(stmt, 2);
+        count++;
+    }
+
+    sqlite3_finalize(stmt);
+    *out_stats = stats;
+    return count;
+}
+
+int db_get_date_range_stats(const char *from, const char *to,
+                             KeyStat **out_stats)
+{
+    if (!g_db || !out_stats || !from || !to) return 0;
+
+    const char *sql =
+        "SELECT kd.key_code, kc.key_name, SUM(kd.count) "
+        "FROM key_daily kd "
+        "LEFT JOIN key_counts kc ON kd.key_code = kc.key_code "
+        "WHERE kd.date >= ?1 AND kd.date <= ?2 "
+        "GROUP BY kd.key_code "
+        "ORDER BY SUM(kd.count) DESC;";
+
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return 0;
+
+    sqlite3_bind_text(stmt, 1, from, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, to, -1, SQLITE_STATIC);
+
+    int capacity = 64;
+    int count = 0;
+    KeyStat *stats = malloc(sizeof(KeyStat) * capacity);
+    if (!stats) {
+        sqlite3_finalize(stmt);
+        return 0;
+    }
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        if (count >= capacity) {
+            capacity *= 2;
+            KeyStat *tmp = realloc(stats, sizeof(KeyStat) * capacity);
+            if (!tmp) {
+                free(stats);
+                sqlite3_finalize(stmt);
+                return 0;
+            }
+            stats = tmp;
+        }
+
+        stats[count].key_code = sqlite3_column_int(stmt, 0);
+        const char *name = (const char *)sqlite3_column_text(stmt, 1);
+        if (name) {
+            strncpy(stats[count].key_name, name, 63);
+        } else {
+            char buf[16];
+            sprintf(buf, "Key 0x%02X", stats[count].key_code);
+            strncpy(stats[count].key_name, buf, 63);
+        }
+        stats[count].key_name[63] = '\0';
+        stats[count].count = sqlite3_column_int64(stmt, 2);
+        count++;
+    }
+
+    sqlite3_finalize(stmt);
+    *out_stats = stats;
+    return count;
 }
 
 int db_get_setting_int(const char *key, int default_val)
