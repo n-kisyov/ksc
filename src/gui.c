@@ -11,6 +11,7 @@ static BOOL g_dark_mode = FALSE;
 static HBRUSH g_hDarkBrush = NULL;
 static HBRUSH g_hLvBrush = NULL;
 static HICON g_hAppIcon = NULL;
+static HWND g_hClickerWnd = NULL;
 
 typedef void (WINAPI *fnSetPreferredAppMode)(int mode);
 typedef BOOL (WINAPI *fnAllowDarkModeForWindow)(HWND hWnd, BOOL allow);
@@ -1099,6 +1100,525 @@ static void export_all_data(HWND hParent)
     db_free_stats(stats);
 }
 
+static void format_shortcut(int packed, char *buf, int bufsize)
+{
+    int vk = packed & 0xFFFF;
+    int mod = (packed >> 16) & 0xFFFF;
+    int pos = 0;
+    if (mod & MOD_CONTROL) pos += sprintf(buf + pos, "Ctrl+");
+    if (mod & MOD_SHIFT)   pos += sprintf(buf + pos, "Shift+");
+    if (mod & MOD_ALT)     pos += sprintf(buf + pos, "Alt+");
+    if (mod & MOD_WIN)     pos += sprintf(buf + pos, "Win+");
+    if (vk >= 'A' && vk <= 'Z')
+        sprintf(buf + pos, "%c", (char)vk);
+    else if (vk >= '0' && vk <= '9')
+        sprintf(buf + pos, "%c", (char)vk);
+    else if (vk >= VK_F1 && vk <= VK_F24)
+        sprintf(buf + pos, "F%d", vk - VK_F1 + 1);
+    else
+        sprintf(buf + pos, "Key%d", vk);
+}
+
+typedef struct {
+    HWND hMinEdit, hSecEdit, hMsEdit;
+    HWND hOffsetEdit;
+    HWND hBtnLeft, hBtnRight;
+    HWND hContinuous, hLimited;
+    HWND hLimitedCount;
+    HWND hShortStart, hShortStop;
+    HWND hBtnSetStart, hBtnSetStop;
+    HWND hBtnStart, hBtnStop;
+    HWND hStatus;
+    volatile BOOL running;
+    HANDLE hThread;
+    int clickedSoFar;
+    int capturing;
+    int hotkeyStartId;
+    int hotkeyStopId;
+} ClickerData;
+
+static void register_clicker_hotkey(HWND hMain, int id, int shortcut)
+{
+    if (shortcut <= 0) return;
+    int vk = shortcut & 0xFFFF;
+    int mod = (shortcut >> 16) & 0xFFFF;
+    RegisterHotKey(hMain, id, mod, vk);
+}
+
+static void unregister_clicker_hotkey(HWND hMain, int id)
+{
+    UnregisterHotKey(hMain, id);
+}
+
+static DWORD WINAPI ClickerThreadProc(LPVOID param)
+{
+    ClickerData *d = (ClickerData *)param;
+    srand(GetTickCount());
+    d->clickedSoFar = 0;
+
+    HWND hDlg = GetParent(d->hBtnStart);
+    int intervalMs = GetDlgItemInt(hDlg, IDC_CLICK_INTERVAL_MIN,
+                                    NULL, FALSE) * 60000
+                   + GetDlgItemInt(hDlg, IDC_CLICK_INTERVAL_SEC,
+                                    NULL, FALSE) * 1000
+                   + GetDlgItemInt(hDlg, IDC_CLICK_INTERVAL_MS,
+                                    NULL, FALSE);
+    int offsetMs = GetDlgItemInt(hDlg, IDC_CLICK_RANDOM_OFFSET,
+                                  NULL, FALSE);
+    BOOL isLeft = (SendMessage(d->hBtnLeft, BM_GETCHECK, 0, 0)
+                   == BST_CHECKED);
+    BOOL continuous = (SendMessage(d->hContinuous, BM_GETCHECK, 0, 0)
+                       == BST_CHECKED);
+    int limit = GetDlgItemInt(hDlg, IDC_CLICK_LIMITED_COUNT,
+                               NULL, FALSE);
+
+    if (intervalMs < 10) intervalMs = 10;
+
+    while (d->running) {
+        INPUT inp[2];
+        memset(inp, 0, sizeof(inp));
+        inp[0].type = INPUT_MOUSE;
+        inp[1].type = INPUT_MOUSE;
+        if (isLeft) {
+            inp[0].mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+            inp[1].mi.dwFlags = MOUSEEVENTF_LEFTUP;
+        } else {
+            inp[0].mi.dwFlags = MOUSEEVENTF_RIGHTDOWN;
+            inp[1].mi.dwFlags = MOUSEEVENTF_RIGHTUP;
+        }
+        SendInput(2, inp, sizeof(INPUT));
+
+        d->clickedSoFar++;
+        if (!continuous && d->clickedSoFar >= limit) {
+            d->running = FALSE;
+            break;
+        }
+
+        int delay = intervalMs;
+        if (offsetMs > 0) {
+            int r = (rand() % (2 * offsetMs + 1)) - offsetMs;
+            delay += r;
+        }
+        if (delay < 10) delay = 10;
+        Sleep(delay);
+    }
+
+    return 0;
+}
+
+static void apply_clicker_dark(HWND hWnd)
+{
+    BOOL dark = db_get_setting_int("dark_mode", 0);
+    if (dark) {
+        BOOL useDark = TRUE;
+        DwmSetWindowAttribute(hWnd, DWMWA_USE_IMMERSIVE_DARK_MODE,
+                              &useDark, sizeof(useDark));
+        if (g_pAllowDarkModeForWindow)
+            g_pAllowDarkModeForWindow(hWnd, TRUE);
+        SetWindowPos(hWnd, NULL, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
+                     SWP_NOACTIVATE | SWP_FRAMECHANGED);
+    }
+}
+
+static LRESULT CALLBACK MouseClickerWndProc(HWND hWnd, UINT msg,
+                                             WPARAM wParam, LPARAM lParam)
+{
+    switch (msg) {
+    case WM_CREATE: {
+        ClickerData *d = calloc(1, sizeof(ClickerData));
+        if (!d) return -1;
+        d->hotkeyStartId = HOTKEY_ID_START_CLICK;
+        d->hotkeyStopId  = HOTKEY_ID_STOP_CLICK;
+
+        int y, xLabel = 10, xVal = 15, dy = 24, h = 22;
+        (void)xLabel;
+
+        /* Row: Click Interval */
+        y = 10;
+        CreateWindow(WC_STATIC, "Click Interval:",
+                     WS_CHILD | WS_VISIBLE | SS_LEFT,
+                     xLabel, y, 100, h, hWnd, NULL, g_hInst, NULL);
+        y += dy;
+        d->hMinEdit = CreateWindow(WC_EDIT, "0",
+                        WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER,
+                        15, y, 50, h, hWnd,
+                        (HMENU)IDC_CLICK_INTERVAL_MIN, g_hInst, NULL);
+        CreateWindow(WC_STATIC, "m",
+                     WS_CHILD | WS_VISIBLE | SS_LEFT,
+                     70, y + 2, 12, h, hWnd, NULL, g_hInst, NULL);
+        d->hSecEdit = CreateWindow(WC_EDIT, "1",
+                        WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER,
+                        90, y, 50, h, hWnd,
+                        (HMENU)IDC_CLICK_INTERVAL_SEC, g_hInst, NULL);
+        CreateWindow(WC_STATIC, "s",
+                     WS_CHILD | WS_VISIBLE | SS_LEFT,
+                     145, y + 2, 12, h, hWnd, NULL, g_hInst, NULL);
+        d->hMsEdit = CreateWindow(WC_EDIT, "0",
+                        WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER,
+                        165, y, 50, h, hWnd,
+                        (HMENU)IDC_CLICK_INTERVAL_MS, g_hInst, NULL);
+        CreateWindow(WC_STATIC, "ms",
+                     WS_CHILD | WS_VISIBLE | SS_LEFT,
+                     220, y + 2, 20, h, hWnd, NULL, g_hInst, NULL);
+
+        /* Row: Random Offset */
+        y += dy + 8;
+        CreateWindow(WC_STATIC, "Random Offset:",
+                     WS_CHILD | WS_VISIBLE | SS_LEFT,
+                     xLabel, y, 100, h, hWnd, NULL, g_hInst, NULL);
+        y += dy;
+        CreateWindow(WC_STATIC, " -+",
+                     WS_CHILD | WS_VISIBLE | SS_LEFT,
+                     18, y + 2, 22, h, hWnd, NULL, g_hInst, NULL);
+        d->hOffsetEdit = CreateWindow(WC_EDIT, "0",
+                           WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER,
+                           42, y, 55, h, hWnd,
+                           (HMENU)IDC_CLICK_RANDOM_OFFSET, g_hInst, NULL);
+        CreateWindow(WC_STATIC, "ms",
+                     WS_CHILD | WS_VISIBLE | SS_LEFT,
+                     102, y + 2, 20, h, hWnd, NULL, g_hInst, NULL);
+
+        /* Row: Mouse Button */
+        y += dy + 8;
+        CreateWindow(WC_STATIC, "Mouse Button:",
+                     WS_CHILD | WS_VISIBLE | SS_LEFT,
+                     xLabel, y, 110, h, hWnd, NULL, g_hInst, NULL);
+        y += dy;
+        d->hBtnLeft = CreateWindow(WC_BUTTON, "Left",
+                        WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON | WS_GROUP,
+                        25, y, 70, h, hWnd,
+                        (HMENU)IDC_CLICK_BTN_LEFT, g_hInst, NULL);
+        d->hBtnRight = CreateWindow(WC_BUTTON, "Right",
+                         WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+                         120, y, 70, h, hWnd,
+                         (HMENU)IDC_CLICK_BTN_RIGHT, g_hInst, NULL);
+
+        /* Row: Mode */
+        y += dy + 8;
+        CreateWindow(WC_STATIC, "Mode:",
+                     WS_CHILD | WS_VISIBLE | SS_LEFT,
+                     xLabel, y, 60, h, hWnd, NULL, g_hInst, NULL);
+        y += dy;
+        d->hContinuous = CreateWindow(WC_BUTTON, "Continuous",
+                           WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON |
+                           WS_GROUP,
+                           25, y, 130, h, hWnd,
+                           (HMENU)IDC_CLICK_MODE_CONT, g_hInst, NULL);
+        y += dy;
+        d->hLimited = CreateWindow(WC_BUTTON, "Limited:",
+                       WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+                       25, y, 80, h, hWnd,
+                       (HMENU)IDC_CLICK_MODE_LIMITED, g_hInst, NULL);
+        d->hLimitedCount = CreateWindow(WC_EDIT, "50",
+                              WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER,
+                              115, y, 55, h, hWnd,
+                              (HMENU)IDC_CLICK_LIMITED_COUNT, g_hInst, NULL);
+        CreateWindow(WC_STATIC, "clicks",
+                     WS_CHILD | WS_VISIBLE | SS_LEFT,
+                     175, y + 2, 50, h, hWnd, NULL, g_hInst, NULL);
+
+        /* Row: Start Shortcut */
+        y += dy + 8;
+        CreateWindow(WC_STATIC, "Start Shortcut:",
+                     WS_CHILD | WS_VISIBLE | SS_LEFT,
+                     xLabel, y, 100, h, hWnd, NULL, g_hInst, NULL);
+        y += dy;
+        d->hShortStart = CreateWindow(WC_STATIC, "Ctrl+Shift+S",
+                           WS_CHILD | WS_VISIBLE | SS_SUNKEN | SS_CENTER,
+                           120, y, 170, h, hWnd,
+                           (HMENU)IDC_CLICK_SHORT_START, g_hInst, NULL);
+        d->hBtnSetStart = CreateWindow(WC_BUTTON, "Set",
+                            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                            300, y, 55, h, hWnd,
+                            (HMENU)IDC_CLICK_BTN_SET_START, g_hInst, NULL);
+
+        /* Row: Stop Shortcut */
+        y += dy + 6;
+        CreateWindow(WC_STATIC, "Stop Shortcut:",
+                     WS_CHILD | WS_VISIBLE | SS_LEFT,
+                     xLabel, y, 100, h, hWnd, NULL, g_hInst, NULL);
+        y += dy;
+        d->hShortStop = CreateWindow(WC_STATIC, "Ctrl+Shift+X",
+                          WS_CHILD | WS_VISIBLE | SS_SUNKEN | SS_CENTER,
+                          120, y, 170, h, hWnd,
+                          (HMENU)IDC_CLICK_SHORT_STOP, g_hInst, NULL);
+        d->hBtnSetStop = CreateWindow(WC_BUTTON, "Set",
+                           WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                           300, y, 55, h, hWnd,
+                           (HMENU)IDC_CLICK_BTN_SET_STOP, g_hInst, NULL);
+
+        /* Status text */
+        y += dy + 8;
+        d->hStatus = CreateWindow(WC_STATIC, "Status: Idle",
+                       WS_CHILD | WS_VISIBLE | SS_LEFT,
+                       10, y, 400, h, hWnd,
+                       (HMENU)IDC_CLICK_STATUS, g_hInst, NULL);
+
+        /* Start / Stop buttons */
+        y += dy + 4;
+        d->hBtnStart = CreateWindow(WC_BUTTON, "Start",
+                        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                        110, y, 85, 26, hWnd,
+                        (HMENU)IDC_CLICK_BTN_START, g_hInst, NULL);
+        d->hBtnStop = CreateWindow(WC_BUTTON, "Stop",
+                       WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                       215, y, 85, 26, hWnd,
+                       (HMENU)IDC_CLICK_BTN_STOP, g_hInst, NULL);
+
+        SetWindowLongPtr(hWnd, GWLP_USERDATA, (LONG_PTR)d);
+
+        /* Load saved settings */
+        int intervalMs = db_get_setting_int("clicker_interval_ms", 1000);
+        SetDlgItemInt(hWnd, IDC_CLICK_INTERVAL_MIN,
+                      intervalMs / 60000, FALSE);
+        SetDlgItemInt(hWnd, IDC_CLICK_INTERVAL_SEC,
+                      (intervalMs % 60000) / 1000, FALSE);
+        SetDlgItemInt(hWnd, IDC_CLICK_INTERVAL_MS,
+                      intervalMs % 1000, FALSE);
+        SetDlgItemInt(hWnd, IDC_CLICK_RANDOM_OFFSET,
+                      db_get_setting_int("clicker_random_offset", 0), FALSE);
+        if (db_get_setting_int("clicker_left_button", 1))
+            SendMessage(d->hBtnLeft, BM_SETCHECK, BST_CHECKED, 0);
+        else
+            SendMessage(d->hBtnRight, BM_SETCHECK, BST_CHECKED, 0);
+        if (db_get_setting_int("clicker_continuous", 1))
+            SendMessage(d->hContinuous, BM_SETCHECK, BST_CHECKED, 0);
+        else {
+            SendMessage(d->hLimited, BM_SETCHECK, BST_CHECKED, 0);
+            EnableWindow(d->hLimitedCount, TRUE);
+        }
+        SetDlgItemInt(hWnd, IDC_CLICK_LIMITED_COUNT,
+                      db_get_setting_int("clicker_limited_count", 50), FALSE);
+
+        int startSc = db_get_setting_int("clicker_start_shortcut",
+                        (MOD_CONTROL | MOD_SHIFT) << 16 | 'S');
+        int stopSc  = db_get_setting_int("clicker_stop_shortcut",
+                        (MOD_CONTROL | MOD_SHIFT) << 16 | 'X');
+        {
+            char buf[64];
+            format_shortcut(startSc, buf, sizeof(buf));
+            SetWindowText(d->hShortStart, buf);
+            format_shortcut(stopSc, buf, sizeof(buf));
+            SetWindowText(d->hShortStop, buf);
+        }
+
+        HWND hMain = GetParent(hWnd);
+        register_clicker_hotkey(hMain, d->hotkeyStartId, startSc);
+        register_clicker_hotkey(hMain, d->hotkeyStopId, stopSc);
+
+        apply_clicker_dark(hWnd);
+        return 0;
+    }
+
+    case WM_ERASEBKGND: {
+        BOOL dark = db_get_setting_int("dark_mode", 0);
+        if (dark && g_hDarkBrush) {
+            RECT rc;
+            GetClientRect(hWnd, &rc);
+            FillRect((HDC)wParam, &rc, g_hDarkBrush);
+            return TRUE;
+        }
+        return DefWindowProc(hWnd, msg, wParam, lParam);
+    }
+
+    case WM_CTLCOLORBTN:
+    case WM_CTLCOLORSTATIC: {
+        BOOL dark = db_get_setting_int("dark_mode", 0);
+        if (dark && g_hDarkBrush) {
+            HDC hdc = (HDC)wParam;
+            SetBkMode(hdc, TRANSPARENT);
+            SetTextColor(hdc, RGB(230, 230, 230));
+            return (LRESULT)g_hDarkBrush;
+        }
+        return DefWindowProc(hWnd, msg, wParam, lParam);
+    }
+
+    case WM_KEYDOWN:
+    case WM_SYSKEYDOWN: {
+        ClickerData *d = (ClickerData *)GetWindowLongPtr(
+            hWnd, GWLP_USERDATA);
+        if (d && d->capturing) {
+            int vk = (int)wParam;
+            int mod = 0;
+            if (GetAsyncKeyState(VK_CONTROL) & 0x8000) mod |= MOD_CONTROL;
+            if (GetAsyncKeyState(VK_SHIFT)   & 0x8000) mod |= MOD_SHIFT;
+            if (GetAsyncKeyState(VK_MENU)    & 0x8000) mod |= MOD_ALT;
+            if ((GetAsyncKeyState(VK_LWIN) | GetAsyncKeyState(VK_RWIN))
+                & 0x8000) mod |= MOD_WIN;
+            if (mod == 0) { d->capturing = 0; return 0; }
+
+            int packed = (mod << 16) | vk;
+            char buf[64];
+            format_shortcut(packed, buf, sizeof(buf));
+
+            HWND hMain = GetParent(hWnd);
+            if (d->capturing == 1) {
+                SetWindowText(d->hShortStart, buf);
+                db_set_setting_int("clicker_start_shortcut", packed);
+                unregister_clicker_hotkey(hMain, d->hotkeyStartId);
+                register_clicker_hotkey(hMain, d->hotkeyStartId, packed);
+            } else {
+                SetWindowText(d->hShortStop, buf);
+                db_set_setting_int("clicker_stop_shortcut", packed);
+                unregister_clicker_hotkey(hMain, d->hotkeyStopId);
+                register_clicker_hotkey(hMain, d->hotkeyStopId, packed);
+            }
+            d->capturing = 0;
+            return 0;
+        }
+        break;
+    }
+
+    case WM_CLICKER_CMD: {
+        ClickerData *d = (ClickerData *)GetWindowLongPtr(
+            hWnd, GWLP_USERDATA);
+        if (!d) return 0;
+        int cmd = (int)wParam;
+        if (cmd == 0 && !d->running) {
+            /* Start */
+            d->running = TRUE;
+            d->hThread = CreateThread(NULL, 0, ClickerThreadProc,
+                                       d, 0, NULL);
+            SetWindowText(d->hStatus, "Status: Running...");
+        } else if (cmd == 1 && d->running) {
+            /* Stop */
+            d->running = FALSE;
+            if (d->hThread) {
+                WaitForSingleObject(d->hThread, 3000);
+                CloseHandle(d->hThread);
+                d->hThread = NULL;
+            }
+            char buf[64];
+            sprintf(buf, "Status: Stopped (%d clicks)", d->clickedSoFar);
+            SetWindowText(d->hStatus, buf);
+        } else if (cmd == 2) {
+            /* Thread finished */
+            if (d->hThread) {
+                WaitForSingleObject(d->hThread, 3000);
+                CloseHandle(d->hThread);
+                d->hThread = NULL;
+            }
+            char buf[64];
+            sprintf(buf, "Status: Done (%d clicks)", d->clickedSoFar);
+            SetWindowText(d->hStatus, buf);
+        }
+        return 0;
+    }
+
+    case WM_COMMAND: {
+        ClickerData *d = (ClickerData *)GetWindowLongPtr(
+            hWnd, GWLP_USERDATA);
+        if (!d) break;
+        WORD id = LOWORD(wParam);
+        WORD code = HIWORD(wParam);
+
+        if (code == BN_CLICKED) {
+            if (id == IDC_CLICK_BTN_SET_START) {
+                d->capturing = 1;
+                SetWindowText(d->hShortStart, "Press keys...");
+                return 0;
+            }
+            if (id == IDC_CLICK_BTN_SET_STOP) {
+                d->capturing = 2;
+                SetWindowText(d->hShortStop, "Press keys...");
+                return 0;
+            }
+            if (id == IDC_CLICK_BTN_START) {
+                int intervalMs = GetDlgItemInt(hWnd,
+                    IDC_CLICK_INTERVAL_MIN, NULL, FALSE) * 60000
+                    + GetDlgItemInt(hWnd,
+                    IDC_CLICK_INTERVAL_SEC, NULL, FALSE) * 1000
+                    + GetDlgItemInt(hWnd,
+                    IDC_CLICK_INTERVAL_MS, NULL, FALSE);
+                if (intervalMs < 10) intervalMs = 10;
+                BOOL isLeft = (SendMessage(d->hBtnLeft,
+                                BM_GETCHECK, 0, 0) == BST_CHECKED);
+                BOOL continuous = (SendMessage(d->hContinuous,
+                                    BM_GETCHECK, 0, 0) == BST_CHECKED);
+
+                db_set_setting_int("clicker_interval_ms", intervalMs);
+                db_set_setting_int("clicker_random_offset",
+                    GetDlgItemInt(hWnd, IDC_CLICK_RANDOM_OFFSET,
+                                  NULL, FALSE));
+                db_set_setting_int("clicker_left_button", isLeft ? 1 : 0);
+                db_set_setting_int("clicker_continuous",
+                                   continuous ? 1 : 0);
+                db_set_setting_int("clicker_limited_count",
+                    GetDlgItemInt(hWnd, IDC_CLICK_LIMITED_COUNT,
+                                  NULL, FALSE));
+
+                PostMessage(hWnd, WM_CLICKER_CMD, 0, 0);
+                return 0;
+            }
+            if (id == IDC_CLICK_BTN_STOP) {
+                PostMessage(hWnd, WM_CLICKER_CMD, 1, 0);
+                return 0;
+            }
+            if (id == IDC_CLICK_MODE_CONT) {
+                EnableWindow(d->hLimitedCount, FALSE);
+                return 0;
+            }
+            if (id == IDC_CLICK_MODE_LIMITED) {
+                EnableWindow(d->hLimitedCount, TRUE);
+                return 0;
+            }
+        }
+        break;
+    }
+
+    case WM_CLOSE:
+        DestroyWindow(hWnd);
+        return 0;
+
+    case WM_DESTROY: {
+        ClickerData *d = (ClickerData *)GetWindowLongPtr(
+            hWnd, GWLP_USERDATA);
+        if (d) {
+            d->running = FALSE;
+            if (d->hThread) {
+                WaitForSingleObject(d->hThread, 3000);
+                CloseHandle(d->hThread);
+            }
+            HWND hMain = GetParent(hWnd);
+            unregister_clicker_hotkey(hMain, d->hotkeyStartId);
+            unregister_clicker_hotkey(hMain, d->hotkeyStopId);
+            free(d);
+        }
+        g_hClickerWnd = NULL;
+        return 0;
+    }
+    }
+    return DefWindowProc(hWnd, msg, wParam, lParam);
+}
+
+static void show_mouse_clicker(HWND hParent)
+{
+    if (g_hClickerWnd && IsWindow(g_hClickerWnd)) {
+        SetForegroundWindow(g_hClickerWnd);
+        return;
+    }
+    static BOOL registered = FALSE;
+    if (!registered) {
+        WNDCLASS wc = {0};
+        wc.lpfnWndProc = MouseClickerWndProc;
+        wc.hInstance = g_hInst;
+        wc.hIcon = g_hAppIcon;
+        wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+        wc.lpszClassName = "KSC_MouseClicker";
+        RegisterClass(&wc);
+        registered = TRUE;
+    }
+    HWND hDlg = CreateWindow("KSC_MouseClicker", "ksc - Mouse Clicker",
+                 WS_OVERLAPPEDWINDOW,
+                 CW_USEDEFAULT, CW_USEDEFAULT, 440, 420,
+                 hParent, NULL, g_hInst, NULL);
+    g_hClickerWnd = hDlg;
+    ShowWindow(hDlg, SW_SHOW);
+    UpdateWindow(hDlg);
+}
+
 static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg,
                                     WPARAM wParam, LPARAM lParam)
 {
@@ -1138,6 +1658,7 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg,
         AppendMenu(hFileMenu, MF_STRING, IDM_HEATMAP, "Key Heatmap");
         AppendMenu(hFileMenu, MF_STRING, IDM_STATS, "Stats");
         AppendMenu(hFileMenu, MF_STRING, IDM_EXPORT_CSV, "Export Data...");
+        AppendMenu(hFileMenu, MF_STRING, IDM_MOUSE_CLICKER, "Mouse Clicker");
         AppendMenu(hFileMenu, MF_SEPARATOR, 0, NULL);
         AppendMenu(hFileMenu, MF_STRING, IDM_QUIT, "Quit");
         AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hFileMenu, "File");
@@ -1237,6 +1758,16 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg,
         }
         return 0;
 
+    case WM_HOTKEY:
+        if (g_hClickerWnd && IsWindow(g_hClickerWnd)) {
+            if (wParam == HOTKEY_ID_START_CLICK) {
+                PostMessage(g_hClickerWnd, WM_CLICKER_CMD, 0, 0);
+            } else if (wParam == HOTKEY_ID_STOP_CLICK) {
+                PostMessage(g_hClickerWnd, WM_CLICKER_CMD, 1, 0);
+            }
+        }
+        return 0;
+
     case WM_COMMAND:
         switch (LOWORD(wParam)) {
         case IDM_SHOW:
@@ -1258,6 +1789,9 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg,
             break;
         case IDM_EXPORT_CSV:
             export_all_data(hWnd);
+            break;
+        case IDM_MOUSE_CLICKER:
+            show_mouse_clicker(hWnd);
             break;
         case IDM_REFRESH:
             refresh_list_view();
