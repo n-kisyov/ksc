@@ -1129,6 +1129,7 @@ typedef struct {
     HWND hBtnSetStart, hBtnSetStop;
     HWND hBtnStart, hBtnStop;
     HWND hStatus;
+    HWND hMainWnd;
     volatile BOOL running;
     HANDLE hThread;
     int clickedSoFar;
@@ -1137,12 +1138,12 @@ typedef struct {
     int hotkeyStopId;
 } ClickerData;
 
-static void register_clicker_hotkey(HWND hMain, int id, int shortcut)
+static int register_clicker_hotkey(HWND hMain, int id, int shortcut)
 {
-    if (shortcut <= 0) return;
+    if (shortcut <= 0) return 0;
     int vk = shortcut & 0xFFFF;
     int mod = (shortcut >> 16) & 0xFFFF;
-    RegisterHotKey(hMain, id, mod, vk);
+    return RegisterHotKey(hMain, id, mod | MOD_NOREPEAT, vk);
 }
 
 static void unregister_clicker_hotkey(HWND hMain, int id)
@@ -1230,6 +1231,10 @@ static LRESULT CALLBACK MouseClickerWndProc(HWND hWnd, UINT msg,
         if (!d) return -1;
         d->hotkeyStartId = HOTKEY_ID_START_CLICK;
         d->hotkeyStopId  = HOTKEY_ID_STOP_CLICK;
+        {
+            CREATESTRUCT *cs = (CREATESTRUCT *)lParam;
+            d->hMainWnd = cs->hwndParent;
+        }
 
         int y, xLabel = 10, xVal = 15, dy = 24, h = 22;
         (void)xLabel;
@@ -1403,9 +1408,12 @@ static LRESULT CALLBACK MouseClickerWndProc(HWND hWnd, UINT msg,
             SetWindowText(d->hShortStop, buf);
         }
 
-        HWND hMain = GetParent(hWnd);
-        register_clicker_hotkey(hMain, d->hotkeyStartId, startSc);
-        register_clicker_hotkey(hMain, d->hotkeyStopId, stopSc);
+        if (!register_clicker_hotkey(d->hMainWnd, d->hotkeyStartId, startSc))
+            SetWindowText(d->hStatus,
+                "WARNING: Start hotkey in use by another app");
+        if (!register_clicker_hotkey(d->hMainWnd, d->hotkeyStopId, stopSc))
+            SetWindowText(d->hStatus,
+                "WARNING: Stop hotkey in use by another app");
 
         apply_clicker_dark(hWnd);
         return 0;
@@ -1440,6 +1448,9 @@ static LRESULT CALLBACK MouseClickerWndProc(HWND hWnd, UINT msg,
             hWnd, GWLP_USERDATA);
         if (d && d->capturing) {
             int vk = (int)wParam;
+            if (vk == VK_CONTROL || vk == VK_SHIFT || vk == VK_MENU ||
+                vk == VK_LWIN || vk == VK_RWIN)
+                return 0;
             int mod = 0;
             if (GetAsyncKeyState(VK_CONTROL) & 0x8000) mod |= MOD_CONTROL;
             if (GetAsyncKeyState(VK_SHIFT)   & 0x8000) mod |= MOD_SHIFT;
@@ -1452,17 +1463,22 @@ static LRESULT CALLBACK MouseClickerWndProc(HWND hWnd, UINT msg,
             char buf[64];
             format_shortcut(packed, buf, sizeof(buf));
 
-            HWND hMain = GetParent(hWnd);
             if (d->capturing == 1) {
                 SetWindowText(d->hShortStart, buf);
                 db_set_setting_int("clicker_start_shortcut", packed);
-                unregister_clicker_hotkey(hMain, d->hotkeyStartId);
-                register_clicker_hotkey(hMain, d->hotkeyStartId, packed);
+                unregister_clicker_hotkey(d->hMainWnd, d->hotkeyStartId);
+                if (!register_clicker_hotkey(d->hMainWnd,
+                        d->hotkeyStartId, packed))
+                    SetWindowText(d->hStatus,
+                        "WARNING: Shortcut already in use by another app");
             } else {
                 SetWindowText(d->hShortStop, buf);
                 db_set_setting_int("clicker_stop_shortcut", packed);
-                unregister_clicker_hotkey(hMain, d->hotkeyStopId);
-                register_clicker_hotkey(hMain, d->hotkeyStopId, packed);
+                unregister_clicker_hotkey(d->hMainWnd, d->hotkeyStopId);
+                if (!register_clicker_hotkey(d->hMainWnd,
+                        d->hotkeyStopId, packed))
+                    SetWindowText(d->hStatus,
+                        "WARNING: Shortcut already in use by another app");
             }
             d->capturing = 0;
             return 0;
@@ -1517,11 +1533,13 @@ static LRESULT CALLBACK MouseClickerWndProc(HWND hWnd, UINT msg,
             if (id == IDC_CLICK_BTN_SET_START) {
                 d->capturing = 1;
                 SetWindowText(d->hShortStart, "Press keys...");
+                SetFocus(hWnd);
                 return 0;
             }
             if (id == IDC_CLICK_BTN_SET_STOP) {
                 d->capturing = 2;
                 SetWindowText(d->hShortStop, "Press keys...");
+                SetFocus(hWnd);
                 return 0;
             }
             if (id == IDC_CLICK_BTN_START) {
@@ -1580,9 +1598,8 @@ static LRESULT CALLBACK MouseClickerWndProc(HWND hWnd, UINT msg,
                 WaitForSingleObject(d->hThread, 3000);
                 CloseHandle(d->hThread);
             }
-            HWND hMain = GetParent(hWnd);
-            unregister_clicker_hotkey(hMain, d->hotkeyStartId);
-            unregister_clicker_hotkey(hMain, d->hotkeyStopId);
+            unregister_clicker_hotkey(d->hMainWnd, d->hotkeyStartId);
+            unregister_clicker_hotkey(d->hMainWnd, d->hotkeyStopId);
             free(d);
         }
         g_hClickerWnd = NULL;
@@ -1611,8 +1628,8 @@ static void show_mouse_clicker(HWND hParent)
         registered = TRUE;
     }
     HWND hDlg = CreateWindow("KSC_MouseClicker", "ksc - Mouse Clicker",
-                 WS_OVERLAPPEDWINDOW,
-                 CW_USEDEFAULT, CW_USEDEFAULT, 440, 420,
+                 WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
+                 CW_USEDEFAULT, CW_USEDEFAULT, 440, 470,
                  hParent, NULL, g_hInst, NULL);
     g_hClickerWnd = hDlg;
     ShowWindow(hDlg, SW_SHOW);
