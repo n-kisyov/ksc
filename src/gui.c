@@ -1816,14 +1816,25 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg,
         case IDM_QUIT:
             DestroyWindow(hWnd);
             break;
-        case IDM_ABOUT:
-            MessageBox(hWnd,
-                "ksc - Keystroke Counter v0.9\n\n"
-                "Counts every keystroke on your keyboard.\n"
-                "Stores counts in a SQLite database.\n\n"
-                "Built for Windows 11 with MinGW/GCC.",
-                "About ksc", MB_OK | MB_ICONINFORMATION);
+        case IDM_ABOUT: {
+            TASKDIALOGCONFIG tdc = {0};
+            tdc.cbSize = sizeof(tdc);
+            tdc.hwndParent = hWnd;
+            tdc.pszWindowTitle = L"About ksc";
+            tdc.pszMainInstruction = L"ksc - Keystroke Counter";
+            tdc.pszContent = L"Version 0.9.5rc1\n\n"
+                L"Counts every keystroke on your keyboard.\n"
+                L"Tracks per-application usage.\n"
+                L"Stores counts in a SQLite database.\n\n"
+                L"Built for Windows 11 with MinGW/GCC.\n"
+                L"bbounce.org";
+            tdc.pszMainIcon = TD_INFORMATION_ICON;
+            tdc.dwCommonButtons = TDCBF_OK_BUTTON;
+            tdc.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION |
+                          TDF_POSITION_RELATIVE_TO_WINDOW;
+            TaskDialogIndirect(&tdc, NULL, NULL, NULL);
             break;
+        }
         }
         return 0;
 

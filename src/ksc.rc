@@ -3,8 +3,8 @@
 IDI_MAIN ICON "../src/ksc.ico"
 
 1 VERSIONINFO
-FILEVERSION     0,9,0,0
-PRODUCTVERSION  0,9,0,0
+FILEVERSION     0,9,5,1
+PRODUCTVERSION  0,9,5,1
 FILEFLAGSMASK   0x3f
 FILEFLAGS       0
 FILEOS          0x40004
@@ -17,9 +17,9 @@ BEGIN
         BEGIN
             VALUE "CompanyName",      "bbounce.org"
             VALUE "FileDescription",  "ksc - Keystroke Counter"
-            VALUE "FileVersion",      "0.9"
+            VALUE "FileVersion",      "0.9.5rc1"
             VALUE "ProductName",      "ksc - Keystroke Counter"
-            VALUE "ProductVersion",   "0.9"
+            VALUE "ProductVersion",   "0.9.5rc1"
             VALUE "LegalCopyright",   "Copyright (c) 2026 bbounce.org"
         END
     END
