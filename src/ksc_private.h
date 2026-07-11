@@ -46,6 +46,7 @@
 #define IDM_BACKUP_DB          1011
 #define IDM_RESTORE_DB         1012
 #define IDM_KEYLOG_TOGGLE       1013
+#define IDM_CLOUD_BACKUP        1014
 
 #define IDC_LISTVIEW            2001
 #define IDC_STARTUP_CHK          2002
@@ -78,12 +79,24 @@
 #define IDC_RESET_STATS_BTN      2031
 #define IDC_HOTKEY_SHOW_LBL      2032
 #define IDC_HOTKEY_SET_SHOW      2033
+#define IDC_CLOUD_STATUS         2034
+#define IDC_CLOUD_LOGIN_BTN      2035
+#define IDC_CLOUD_SCHED_OFF      2036
+#define IDC_CLOUD_SCHED_15M      2037
+#define IDC_CLOUD_SCHED_30M      2038
+#define IDC_CLOUD_SCHED_1H       2039
+#define IDC_CLOUD_SCHED_12H      2040
+#define IDC_CLOUD_SCHED_DAILY    2041
+#define IDC_CLOUD_BACKUP_NOW     2042
+#define IDC_CLOUD_LISTVIEW       2043
 
 #define HOTKEY_ID_START_CLICK 100
 #define HOTKEY_ID_STOP_CLICK  101
 #define HOTKEY_ID_SHOW_KSC    102
 #define WM_CLICKER_CMD        (WM_APP + 5)
+#define WM_CLOUD_SYNC          (WM_APP + 6)
 
 #define ID_TIMER_REFRESH 1
+#define ID_TIMER_CLOUD_SYNC 2
 
 #endif

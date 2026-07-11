@@ -467,3 +467,12 @@ int64_t db_get_today_count(void)
     sqlite3_finalize(stmt);
     return total;
 }
+
+void db_get_db_dir(char *buf, int bufsize)
+{
+    char appdata[MAX_PATH];
+    if (GetEnvironmentVariable("APPDATA", appdata, MAX_PATH) > 0)
+        sprintf(buf, "%s\\KSC", appdata);
+    else
+        strcpy(buf, ".");
+}

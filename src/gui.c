@@ -5,6 +5,7 @@
 #include "keyhook.h"
 #include "startup.h"
 #include "tray.h"
+#include "cloudsync.h"
 #include "resource.h"
 
 static HINSTANCE g_hInst = NULL;
@@ -2102,6 +2103,367 @@ static LRESULT CALLBACK MouseClickerWndProc(HWND hWnd, UINT msg,
     return DefWindowProc(hWnd, msg, wParam, lParam);
 }
 
+typedef struct {
+    HWND hStatus;
+    HWND hLoginBtn;
+    HWND hListView;
+    int  loggedIn;
+} CloudBakData;
+
+static void refresh_cloud_history(HWND hListView)
+{
+    if (!hListView) return;
+    ListView_DeleteAllItems(hListView);
+
+    CloudSyncEntry *entries = NULL;
+    int count = 0;
+    if (!cloudsync_load_history(&entries, &count)) return;
+
+    LVITEM lvi;
+    memset(&lvi, 0, sizeof(lvi));
+    lvi.mask = LVIF_TEXT;
+
+    for (int i = 0; i < count; i++) {
+        lvi.iItem = i;
+        lvi.iSubItem = 0;
+        lvi.pszText = entries[i].ts;
+        ListView_InsertItem(hListView, &lvi);
+        ListView_SetItemText(hListView, i, 1, entries[i].files);
+        char szbuf[32];
+        sprintf(szbuf, "%d KB", entries[i].size / 1024);
+        ListView_SetItemText(hListView, i, 2, szbuf);
+        ListView_SetItemText(hListView, i, 3, entries[i].status);
+    }
+
+    cloudsync_free_history(entries);
+}
+
+static void cloud_apply_dark(HWND hWnd, HWND hLv)
+{
+    BOOL dark = db_get_setting_int("dark_mode", 0);
+    if (dark) {
+        BOOL useDark = TRUE;
+        DwmSetWindowAttribute(hWnd, DWMWA_USE_IMMERSIVE_DARK_MODE,
+                              &useDark, sizeof(useDark));
+        if (g_pAllowDarkModeForWindow) g_pAllowDarkModeForWindow(hWnd, TRUE);
+        SetWindowPos(hWnd, NULL, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
+                     SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        if (hLv) {
+            SetWindowTheme(hLv, L"DarkMode_Explorer", NULL);
+            ListView_SetBkColor(hLv, RGB(37, 37, 38));
+            ListView_SetTextBkColor(hLv, RGB(37, 37, 38));
+            ListView_SetTextColor(hLv, RGB(212, 212, 212));
+        }
+    }
+}
+
+static LRESULT CALLBACK CloudBackupWndProc(HWND hWnd, UINT msg,
+                                            WPARAM wParam, LPARAM lParam)
+{
+    switch (msg) {
+    case WM_CREATE: {
+        CloudBakData *d = calloc(1, sizeof(CloudBakData));
+        if (!d) return -1;
+        d->loggedIn = cloudsync_is_logged_in();
+
+        int y = 10, h = 22;
+
+        d->hStatus = CreateWindow(WC_STATIC, "",
+                       WS_CHILD | WS_VISIBLE | SS_LEFT,
+                       10, y, 500, h, hWnd,
+                       (HMENU)IDC_CLOUD_STATUS, g_hInst, NULL);
+        {
+            char buf[256];
+            cloudsync_get_email(buf, sizeof(buf));
+            char label[320];
+            sprintf(label, "Status: %s", buf);
+            SetWindowText(d->hStatus, label);
+        }
+
+        y += 24;
+        d->hLoginBtn = CreateWindow(WC_BUTTON,
+                         d->loggedIn ? "Logout" : "Login",
+                         WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                         10, y, 80, h, hWnd,
+                         (HMENU)IDC_CLOUD_LOGIN_BTN, g_hInst, NULL);
+
+        y += 34;
+        CreateWindow(WC_STATIC, "Schedule:",
+                     WS_CHILD | WS_VISIBLE | SS_LEFT,
+                     10, y, 60, h, hWnd, NULL, g_hInst, NULL);
+        y += 24;
+
+        int sched = cloudsync_get_schedule();
+        int xp = 20;
+        CreateWindow(WC_BUTTON, "Off",
+                     WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON | WS_GROUP,
+                     xp, y, 55, h, hWnd,
+                     (HMENU)IDC_CLOUD_SCHED_OFF, g_hInst, NULL);
+        if (sched == 0) SendMessage(GetDlgItem(hWnd, IDC_CLOUD_SCHED_OFF),
+                                     BM_SETCHECK, BST_CHECKED, 0);
+        xp += 65;
+        CreateWindow(WC_BUTTON, "15 min",
+                     WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+                     xp, y, 70, h, hWnd,
+                     (HMENU)IDC_CLOUD_SCHED_15M, g_hInst, NULL);
+        if (sched == 1) SendMessage(GetDlgItem(hWnd, IDC_CLOUD_SCHED_15M),
+                                     BM_SETCHECK, BST_CHECKED, 0);
+        xp += 80;
+        CreateWindow(WC_BUTTON, "30 min",
+                     WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+                     xp, y, 70, h, hWnd,
+                     (HMENU)IDC_CLOUD_SCHED_30M, g_hInst, NULL);
+        if (sched == 2) SendMessage(GetDlgItem(hWnd, IDC_CLOUD_SCHED_30M),
+                                     BM_SETCHECK, BST_CHECKED, 0);
+        xp += 80;
+        CreateWindow(WC_BUTTON, "1 hr",
+                     WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+                     xp, y, 65, h, hWnd,
+                     (HMENU)IDC_CLOUD_SCHED_1H, g_hInst, NULL);
+        if (sched == 3) SendMessage(GetDlgItem(hWnd, IDC_CLOUD_SCHED_1H),
+                                     BM_SETCHECK, BST_CHECKED, 0);
+        xp += 75;
+        CreateWindow(WC_BUTTON, "12 hr",
+                     WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+                     xp, y, 65, h, hWnd,
+                     (HMENU)IDC_CLOUD_SCHED_12H, g_hInst, NULL);
+        if (sched == 4) SendMessage(GetDlgItem(hWnd, IDC_CLOUD_SCHED_12H),
+                                     BM_SETCHECK, BST_CHECKED, 0);
+        xp += 75;
+        CreateWindow(WC_BUTTON, "Daily",
+                     WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+                     xp, y, 65, h, hWnd,
+                     (HMENU)IDC_CLOUD_SCHED_DAILY, g_hInst, NULL);
+        if (sched == 5) SendMessage(GetDlgItem(hWnd, IDC_CLOUD_SCHED_DAILY),
+                                     BM_SETCHECK, BST_CHECKED, 0);
+
+        y += 32;
+        CreateWindow(WC_BUTTON, "Backup Now",
+                     WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                     10, y, 100, 26, hWnd,
+                     (HMENU)IDC_CLOUD_BACKUP_NOW, g_hInst, NULL);
+
+        y += 36;
+        CreateWindow(WC_STATIC, "Sync History:",
+                     WS_CHILD | WS_VISIBLE | SS_LEFT,
+                     10, y, 120, h, hWnd, NULL, g_hInst, NULL);
+        y += 20;
+
+        HWND hLv = CreateWindow(WC_LISTVIEW, "",
+                    WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL,
+                    0, y, 10, 10,
+                    hWnd, (HMENU)IDC_CLOUD_LISTVIEW, g_hInst, NULL);
+        ListView_SetExtendedListViewStyle(hLv,
+            LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER);
+
+        LVCOLUMN lvc;
+        memset(&lvc, 0, sizeof(lvc));
+        lvc.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
+        lvc.cx = 170; lvc.pszText = "Timestamp"; ListView_InsertColumn(hLv, 0, &lvc);
+        lvc.cx = 220; lvc.pszText = "Files";     ListView_InsertColumn(hLv, 1, &lvc);
+        lvc.cx = 70;  lvc.pszText = "Size";      ListView_InsertColumn(hLv, 2, &lvc);
+        lvc.cx = 70;  lvc.pszText = "Status";    ListView_InsertColumn(hLv, 3, &lvc);
+
+        d->hListView = hLv;
+        SetWindowLongPtr(hWnd, GWLP_USERDATA, (LONG_PTR)d);
+
+        {
+            RECT rc;
+            GetClientRect(hWnd, &rc);
+            SetWindowPos(hLv, NULL, 0, y, rc.right,
+                         rc.bottom - y, SWP_NOZORDER);
+        }
+
+        cloud_apply_dark(hWnd, hLv);
+        refresh_cloud_history(hLv);
+        return 0;
+    }
+
+    case WM_SIZE: {
+        CloudBakData *d = (CloudBakData *)GetWindowLongPtr(
+            hWnd, GWLP_USERDATA);
+        if (d && d->hListView) {
+            RECT rc;
+            GetClientRect(hWnd, &rc);
+            int y = 180;
+            SetWindowPos(d->hListView, NULL, 0, y,
+                         rc.right, rc.bottom - y, SWP_NOZORDER);
+        }
+        return 0;
+    }
+
+    case WM_ERASEBKGND: {
+        BOOL dark = db_get_setting_int("dark_mode", 0);
+        if (dark && g_hDarkBrush) {
+            RECT rc;
+            GetClientRect(hWnd, &rc);
+            FillRect((HDC)wParam, &rc, g_hDarkBrush);
+            return TRUE;
+        }
+        return DefWindowProc(hWnd, msg, wParam, lParam);
+    }
+
+    case WM_CTLCOLORBTN:
+    case WM_CTLCOLORSTATIC: {
+        BOOL dark = db_get_setting_int("dark_mode", 0);
+        if (dark && g_hDarkBrush) {
+            HDC hdc = (HDC)wParam;
+            SetBkMode(hdc, TRANSPARENT);
+            SetTextColor(hdc, RGB(230, 230, 230));
+            return (LRESULT)g_hDarkBrush;
+        }
+        return DefWindowProc(hWnd, msg, wParam, lParam);
+    }
+
+    case WM_NOTIFY: {
+        NMHDR *nmh = (NMHDR *)lParam;
+        if (nmh->idFrom == IDC_CLOUD_LISTVIEW &&
+            nmh->code == NM_CUSTOMDRAW) {
+            BOOL dark = db_get_setting_int("dark_mode", 0);
+            if (dark) {
+                NMLVCUSTOMDRAW *lvcd = (NMLVCUSTOMDRAW *)lParam;
+                switch (lvcd->nmcd.dwDrawStage) {
+                case CDDS_PREPAINT:
+                    SetWindowLongPtr(hWnd, DWLP_MSGRESULT,
+                                     CDRF_NOTIFYITEMDRAW);
+                    return TRUE;
+                case CDDS_ITEMPREPAINT:
+                    lvcd->clrText   = RGB(212, 212, 212);
+                    lvcd->clrTextBk = RGB(37, 37, 38);
+                    SetWindowLongPtr(hWnd, DWLP_MSGRESULT, CDRF_NEWFONT);
+                    return TRUE;
+                }
+            }
+        }
+        break;
+    }
+
+    case WM_COMMAND: {
+        CloudBakData *d = (CloudBakData *)GetWindowLongPtr(
+            hWnd, GWLP_USERDATA);
+        if (!d) break;
+        WORD id = LOWORD(wParam);
+
+        if (id == IDC_CLOUD_LOGIN_BTN &&
+            HIWORD(wParam) == BN_CLICKED) {
+            if (d->loggedIn) {
+                cloudsync_logout();
+                d->loggedIn = 0;
+                SetWindowText(d->hStatus,
+                    "Status: Not logged in");
+                SetWindowText(d->hLoginBtn, "Login");
+            } else {
+                SetWindowText(d->hStatus,
+                    "Status: Opening browser...");
+                ShowWindow(hWnd, SW_MINIMIZE);
+                cloudsync_login(hWnd);
+                ShowWindow(hWnd, SW_RESTORE);
+                d->loggedIn = cloudsync_is_logged_in();
+                char buf[256];
+                cloudsync_get_email(buf, sizeof(buf));
+                char label[320];
+                sprintf(label, "Status: %s", buf);
+                SetWindowText(d->hStatus, label);
+                SetWindowText(d->hLoginBtn,
+                    d->loggedIn ? "Logout" : "Login");
+            }
+            return 0;
+        }
+
+        if (id >= IDC_CLOUD_SCHED_OFF &&
+            id <= IDC_CLOUD_SCHED_DAILY &&
+            HIWORD(wParam) == BN_CLICKED) {
+            int val = id - IDC_CLOUD_SCHED_OFF;
+            cloudsync_set_schedule(val);
+
+            /* restart cloud timer in main window */
+            HWND hMain = GetWindow(hWnd, GW_OWNER);
+            if (hMain) {
+                KillTimer(hMain, ID_TIMER_CLOUD_SYNC);
+                DWORD intervals[] = {
+                    0, 900000, 1800000, 3600000, 43200000, 86400000
+                };
+                if (val > 0 && val <= 5)
+                    SetTimer(hMain, ID_TIMER_CLOUD_SYNC,
+                             intervals[val], NULL);
+            }
+            return 0;
+        }
+
+        if (id == IDC_CLOUD_BACKUP_NOW &&
+            HIWORD(wParam) == BN_CLICKED) {
+            if (!d->loggedIn) {
+                MessageBox(hWnd, "Please login first.",
+                           "Cloud Backup", MB_OK | MB_ICONINFORMATION);
+                return 0;
+            }
+            SetWindowText(d->hStatus,
+                "Status: Backing up...");
+            cloudsync_backup_trigger(hWnd);
+            return 0;
+        }
+        break;
+    }
+
+    case WM_CLOUD_SYNC: {
+        CloudBakData *d = (CloudBakData *)GetWindowLongPtr(
+            hWnd, GWLP_USERDATA);
+        if (d) {
+            if (wParam >= 100) {
+                char buf[256];
+                cloudsync_get_email(buf, sizeof(buf));
+                char label[320];
+                sprintf(label, "Status: %s (sync complete)", buf);
+                SetWindowText(d->hStatus, label);
+                refresh_cloud_history(d->hListView);
+            } else {
+                char buf[320];
+                sprintf(buf,
+                    "Status: Uploading... %lld%%",
+                    (long long)wParam);
+                SetWindowText(d->hStatus, buf);
+            }
+        }
+        return 0;
+    }
+
+    case WM_CLOSE:
+        DestroyWindow(hWnd);
+        return 0;
+
+    case WM_DESTROY: {
+        CloudBakData *d = (CloudBakData *)GetWindowLongPtr(
+            hWnd, GWLP_USERDATA);
+        if (d) free(d);
+        return 0;
+    }
+    }
+    return DefWindowProc(hWnd, msg, wParam, lParam);
+}
+
+static void show_cloud_backup(HWND hParent)
+{
+    static BOOL registered = FALSE;
+    if (!registered) {
+        WNDCLASS wc = {0};
+        wc.lpfnWndProc = CloudBackupWndProc;
+        wc.hInstance = g_hInst;
+        wc.hIcon = g_hAppIcon;
+        wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+        wc.lpszClassName = "KSC_CloudBackup";
+        RegisterClass(&wc);
+        registered = TRUE;
+    }
+    HWND hDlg = CreateWindow("KSC_CloudBackup", "ksc - Cloud Backup",
+                 WS_OVERLAPPEDWINDOW,
+                 CW_USEDEFAULT, CW_USEDEFAULT, 640, 540,
+                 hParent, NULL, g_hInst, NULL);
+    ShowWindow(hDlg, SW_SHOW);
+    UpdateWindow(hDlg);
+}
+
 static void show_mouse_clicker(HWND hParent)
 {
     if (g_hClickerWnd && IsWindow(g_hClickerWnd)) {
@@ -2168,6 +2530,16 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg,
 
         SetTimer(hWnd, ID_TIMER_REFRESH, 1000, NULL);
 
+        {
+            int cs = cloudsync_get_schedule();
+            DWORD intervals[] = {
+                0, 900000, 1800000, 3600000, 43200000, 86400000
+            };
+            if (cs > 0 && cs <= 5)
+                SetTimer(hWnd, ID_TIMER_CLOUD_SYNC,
+                         intervals[cs], NULL);
+        }
+
         HMENU hMenu = CreateMenu();
         HMENU hFileMenu = CreatePopupMenu();
         AppendMenu(hFileMenu, MF_STRING, IDM_SETTINGS, "Settings");
@@ -2178,6 +2550,7 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg,
         AppendMenu(hFileMenu, MF_STRING, IDM_MOUSE_CLICKER, "Mouse Clicker");
         AppendMenu(hFileMenu, MF_SEPARATOR, 0, NULL);
         AppendMenu(hFileMenu, MF_STRING, IDM_BACKUP_DB, "Backup Database...");
+        AppendMenu(hFileMenu, MF_STRING, IDM_CLOUD_BACKUP, "Cloud Backup");
         AppendMenu(hFileMenu, MF_STRING, IDM_RESTORE_DB, "Restore Database...");
         AppendMenu(hFileMenu, MF_SEPARATOR, 0, NULL);
         AppendMenu(hFileMenu, MF_STRING, IDM_QUIT, "Quit");
@@ -2261,6 +2634,9 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg,
         if (wParam == ID_TIMER_REFRESH) {
             refresh_list_view();
             tray_update_tip(hWnd, TRAY_ID);
+        } else if (wParam == ID_TIMER_CLOUD_SYNC) {
+            HWND hCloud = FindWindow("KSC_CloudBackup", NULL);
+            cloudsync_backup_trigger(hCloud);
         }
         return 0;
 
@@ -2343,6 +2719,9 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg,
                 "Keylogger", MB_OK | MB_ICONINFORMATION);
             break;
         }
+        case IDM_CLOUD_BACKUP:
+            show_cloud_backup(hWnd);
+            break;
         case IDM_BACKUP_DB: {
             char appdata[MAX_PATH];
             if (GetEnvironmentVariable("APPDATA", appdata, MAX_PATH) <= 0)
