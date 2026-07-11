@@ -12,6 +12,7 @@ static HBRUSH g_hDarkBrush = NULL;
 static HBRUSH g_hLvBrush = NULL;
 static HICON g_hAppIcon = NULL;
 static HWND g_hClickerWnd = NULL;
+static HWND g_hTotalLabel = NULL;
 
 typedef void (WINAPI *fnSetPreferredAppMode)(int mode);
 typedef BOOL (WINAPI *fnAllowDarkModeForWindow)(HWND hWnd, BOOL allow);
@@ -90,15 +91,44 @@ void gui_init_dark_mode(void)
     }
 }
 
+static int is_mouse_vk(int vk)
+{
+    return vk == VK_LBUTTON || vk == VK_RBUTTON ||
+           vk == VK_MBUTTON || vk == VK_XBUTTON1 ||
+           vk == VK_XBUTTON2;
+}
+
 static void refresh_list_view(void)
 {
     if (!g_hListView) return;
 
+    SendMessage(g_hListView, WM_SETREDRAW, FALSE, 0);
     ListView_DeleteAllItems(g_hListView);
 
     KeyStat *stats = NULL;
     int count = db_get_stats(&stats);
-    if (!stats || count == 0) return;
+    if (!stats || count == 0) {
+        if (g_hTotalLabel)
+            SetWindowText(g_hTotalLabel,
+                "Total keypresses: 0 | Mouse clicks: 0");
+        SendMessage(g_hListView, WM_SETREDRAW, TRUE, 0);
+        return;
+    }
+
+    int64_t kbTotal = 0, mouseTotal = 0;
+    for (int i = 0; i < count; i++) {
+        if (is_mouse_vk(stats[i].key_code))
+            mouseTotal += stats[i].count;
+        else
+            kbTotal += stats[i].count;
+    }
+
+    if (g_hTotalLabel) {
+        char buf[128];
+        sprintf(buf, "Total keypresses: %lld | Mouse clicks: %lld",
+                (long long)kbTotal, (long long)mouseTotal);
+        SetWindowText(g_hTotalLabel, buf);
+    }
 
     LVITEM lvi;
     memset(&lvi, 0, sizeof(lvi));
@@ -116,6 +146,8 @@ static void refresh_list_view(void)
     }
 
     db_free_stats(stats);
+    SendMessage(g_hListView, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(g_hListView, NULL, TRUE);
 }
 
 static void update_theme(HWND hWnd)
@@ -650,12 +682,16 @@ typedef struct {
     HWND hDateFrom;
     HWND hDateTo;
     HWND hAppCombo;
+    HWND hTotal;
 } StatsWinData;
 
-static void stats_refresh_range(HWND hListView, SYSTEMTIME *stFrom,
-                                 SYSTEMTIME *stTo, const char *app)
+static void stats_refresh_range(HWND hListView, HWND hTotal,
+                                 SYSTEMTIME *stFrom, SYSTEMTIME *stTo,
+                                 const char *app)
 {
     if (!hListView || !stFrom || !stTo) return;
+
+    SendMessage(hListView, WM_SETREDRAW, FALSE, 0);
     ListView_DeleteAllItems(hListView);
 
     char from[16], to[16];
@@ -666,7 +702,27 @@ static void stats_refresh_range(HWND hListView, SYSTEMTIME *stFrom,
 
     KeyStat *stats = NULL;
     int count = db_get_date_range_stats(from, to, app, 0, &stats);
-    if (!stats || count == 0) return;
+
+    int64_t kbTotal = 0, mouseTotal = 0;
+    if (stats && count > 0) {
+        for (int i = 0; i < count; i++) {
+            if (is_mouse_vk(stats[i].key_code))
+                mouseTotal += stats[i].count;
+            else
+                kbTotal += stats[i].count;
+        }
+    }
+    if (hTotal) {
+        char buf[128];
+        sprintf(buf, "Keys: %lld | Mouse: %lld",
+                (long long)kbTotal, (long long)mouseTotal);
+        SetWindowText(hTotal, buf);
+    }
+
+    if (!stats || count == 0) {
+        SendMessage(hListView, WM_SETREDRAW, TRUE, 0);
+        return;
+    }
 
     LVITEM lvi;
     memset(&lvi, 0, sizeof(lvi));
@@ -684,6 +740,8 @@ static void stats_refresh_range(HWND hListView, SYSTEMTIME *stFrom,
     }
 
     db_free_stats(stats);
+    SendMessage(hListView, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(hListView, NULL, TRUE);
 }
 
 static void populate_app_combo(HWND hCombo)
@@ -805,6 +863,11 @@ static LRESULT CALLBACK StatsWndProc(HWND hWnd, UINT msg,
                      546, yTop - 1, 72, dph + 2,
                      hWnd, (HMENU)IDC_EXPORT_BTN, g_hInst, NULL);
 
+        data->hTotal = CreateWindow(WC_STATIC, "Keys: 0 | Mouse: 0",
+                         WS_CHILD | WS_VISIBLE | SS_LEFT,
+                         10, 40, 400, 20,
+                         hWnd, NULL, g_hInst, NULL);
+
         SYSTEMTIME stEnd, stStart;
         GetLocalTime(&stEnd);
         stStart = stEnd;
@@ -836,7 +899,7 @@ static LRESULT CALLBACK StatsWndProc(HWND hWnd, UINT msg,
 
         HWND hLv = CreateWindow(WC_LISTVIEW, "",
                     WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL,
-                    0, 44, 10, 10,
+                    0, 62, 10, 10,
                     hWnd, (HMENU)IDC_LISTVIEW, g_hInst, NULL);
 
         ListView_SetExtendedListViewStyle(hLv,
@@ -859,11 +922,12 @@ static LRESULT CALLBACK StatsWndProc(HWND hWnd, UINT msg,
 
         RECT rc;
         GetClientRect(hWnd, &rc);
-        SetWindowPos(hLv, NULL, 0, 44, rc.right, rc.bottom - 44,
+        SetWindowPos(hLv, NULL, 0, 62, rc.right, rc.bottom - 62,
                      SWP_NOZORDER);
 
         stats_apply_theme(hWnd, hLv);
-        stats_refresh_range(hLv, &stMonthAgo, &stEnd, NULL);
+        stats_refresh_range(hLv, data->hTotal, &stMonthAgo, &stEnd, NULL);
+        SetTimer(hWnd, ID_TIMER_REFRESH, 10000, NULL);
         return 0;
     }
 
@@ -873,8 +937,8 @@ static LRESULT CALLBACK StatsWndProc(HWND hWnd, UINT msg,
         if (d && d->hListView) {
             RECT rc;
             GetClientRect(hWnd, &rc);
-            SetWindowPos(d->hListView, NULL, 0, 44,
-                         rc.right, rc.bottom - 44, SWP_NOZORDER);
+            SetWindowPos(d->hListView, NULL, 0, 62,
+                         rc.right, rc.bottom - 62, SWP_NOZORDER);
         }
         return 0;
     }
@@ -949,7 +1013,7 @@ static LRESULT CALLBACK StatsWndProc(HWND hWnd, UINT msg,
                     DTM_GETSYSTEMTIME, 0, (LPARAM)&stTo);
                 if (rFrom == GDT_VALID && rTo == GDT_VALID) {
                     const char *app = get_selected_app(d->hAppCombo);
-                    stats_refresh_range(d->hListView, &stFrom, &stTo, app);
+                    stats_refresh_range(d->hListView, d->hTotal, &stFrom, &stTo, app);
                 }
             }
         } else if (LOWORD(wParam) == IDC_APP_COMBO &&
@@ -964,7 +1028,7 @@ static LRESULT CALLBACK StatsWndProc(HWND hWnd, UINT msg,
                     DTM_GETSYSTEMTIME, 0, (LPARAM)&stTo);
                 if (rFrom == GDT_VALID && rTo == GDT_VALID) {
                     const char *app = get_selected_app(d->hAppCombo);
-                    stats_refresh_range(d->hListView, &stFrom, &stTo, app);
+                    stats_refresh_range(d->hListView, d->hTotal, &stFrom, &stTo, app);
                 }
             }
         } else if (LOWORD(wParam) == IDC_EXPORT_BTN &&
@@ -999,7 +1063,27 @@ static LRESULT CALLBACK StatsWndProc(HWND hWnd, UINT msg,
         }
         break;
 
+    case WM_TIMER:
+        if (wParam == ID_TIMER_REFRESH) {
+            StatsWinData *d = (StatsWinData *)GetWindowLongPtr(
+                hWnd, GWLP_USERDATA);
+            if (d) {
+                SYSTEMTIME stFrom, stTo;
+                LRESULT rFrom = SendMessage(d->hDateFrom,
+                    DTM_GETSYSTEMTIME, 0, (LPARAM)&stFrom);
+                LRESULT rTo = SendMessage(d->hDateTo,
+                    DTM_GETSYSTEMTIME, 0, (LPARAM)&stTo);
+                if (rFrom == GDT_VALID && rTo == GDT_VALID) {
+                    const char *app = get_selected_app(d->hAppCombo);
+                    stats_refresh_range(d->hListView, d->hTotal,
+                                       &stFrom, &stTo, app);
+                }
+            }
+        }
+        return 0;
+
     case WM_CLOSE:
+        KillTimer(hWnd, ID_TIMER_REFRESH);
         DestroyWindow(hWnd);
         return 0;
 
@@ -1644,10 +1728,16 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg,
         RECT rc;
         GetClientRect(hWnd, &rc);
 
+        g_hTotalLabel = CreateWindow(WC_STATIC,
+                         "Total keypresses: 0 | Mouse clicks: 0",
+                         WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
+                         0, 0, rc.right, 24,
+                         hWnd, NULL, g_hInst, NULL);
+
         g_hListView = CreateWindow(WC_LISTVIEW, "",
                                     WS_CHILD | WS_VISIBLE |
                                     LVS_REPORT | LVS_SINGLESEL,
-                                    0, 0, rc.right, rc.bottom,
+                                    0, 24, rc.right, rc.bottom - 24,
                                     hWnd, (HMENU)IDC_LISTVIEW,
                                     g_hInst, NULL);
 
@@ -1697,11 +1787,17 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg,
     }
 
     case WM_SIZE:
+        if (g_hTotalLabel) {
+            RECT rc;
+            GetClientRect(hWnd, &rc);
+            SetWindowPos(g_hTotalLabel, NULL, 0, 0,
+                         rc.right, 24, SWP_NOZORDER);
+        }
         if (g_hListView) {
             RECT rc;
             GetClientRect(hWnd, &rc);
-            SetWindowPos(g_hListView, NULL, 0, 0,
-                         rc.right, rc.bottom, SWP_NOZORDER);
+            SetWindowPos(g_hListView, NULL, 0, 24,
+                         rc.right, rc.bottom - 24, SWP_NOZORDER);
         }
         if (wParam == SIZE_MINIMIZED) {
             ShowWindow(hWnd, SW_HIDE);
