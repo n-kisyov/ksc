@@ -2,6 +2,7 @@
 #include "keyhook.h"
 #include "database.h"
 #include "keylogdb.h"
+#include "cloudsync.h"
 #include "gui.h"
 #include "tray.h"
 
@@ -31,6 +32,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         keylog_open();
         keyhook_set_keylogger_enabled(1);
     }
+
+    cloudsync_init();
 
     gui_init_dark_mode();
 

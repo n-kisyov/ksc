@@ -21,6 +21,9 @@ set(SOURCES
     src/keyhook.c
     src/database.c
     src/keylogdb.c
+    src/cloudsync.c
+    src/http_win.c
+    src/json_micro.c
     src/gui.c
     src/tray.c
     src/startup.c
@@ -41,4 +44,7 @@ target_link_libraries(ksc PRIVATE
     uxtheme
     dwmapi
     comdlg32
+    crypt32
+    ws2_32
+    winhttp
 )
