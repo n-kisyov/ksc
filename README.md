@@ -1,36 +1,57 @@
 # ksc - Keystroke Counter
 
-**Version 0.9** — A lightweight Windows application written in modern C that counts every keystroke on your keyboard, tracks per-application usage, and stores statistics in a SQLite database.
+**Version 0.9.5rc1** — A lightweight Windows application written in modern C (~2.5k LOC) that counts every keystroke on your keyboard, tracks per-application usage, includes a keylogger, mouse clicker, heatmap, statistics, and stores everything in SQLite databases.
 
 ## Features
 
-- **Keystroke & mouse counting** - Captures keyboard keys and left/right mouse clicks system-wide via low-level hooks
-- **Per-application tracking** - Records which app received each keypress (foreground window title)
-- **SQLite storage** - Persists counts in `%APPDATA%\KSC\ksc.db` with per-key and per-key-per-app-per-day tables
-- **Stats view** - ListView sorted by count descending (most-clicked first), with optional auto-refresh
-- **Key heatmap** - Visual keyboard layout colored by usage frequency (blue → red gradient)
-- **Date-range statistics** - Custom date range selector with From/To date pickers and per-app filtering
-- **CSV export** - Export all-time or date-filtered data to CSV, including per-app breakdown
-- **Dark mode** - Full dark theme including title bar, menu bar, list view, scrollbar, and all child windows
-- **System tray** - Minimizes to tray on close/minimize; right-click for Show/Heatmap/Stats/Settings/Quit
-- **Start minimized** - Option to launch directly to system tray
-- **Start with Windows** - Auto-launch via registry toggle
-- **Single instance** - Prevents duplicate processes via named mutex
-- **Self-signed code signing** - Authenticode signature with timestamp at build time; one-time trust command eliminates SmartScreen warnings
-- **Custom app icon** - Embedded icon resource (no external files required at runtime)
-- **Static linking** - Standalone `.exe` with zero runtime DLL dependencies
-- **Low footprint** - Minimal CPU and memory usage
+### Core
+- **Keystroke & mouse counting** — Captures keyboard keys and left/right mouse clicks system-wide via low-level hooks (`WH_KEYBOARD_LL` + `WH_MOUSE_LL`)
+- **Per-application tracking** — Records which app (foreground window title) received each keypress
+- **Total counters** — Main window shows live separated totals: keyboard keypresses vs mouse clicks
+- **Batch database writes** — Ring buffer (256 events) + dedicated writer threads flush in `BEGIN/COMMIT` transactions, minimising SQLite overhead
+
+### Windows & Views
+- **Key heatmap** — Full QWERTY keyboard layout colored by usage frequency (blue → red gradient) with legend
+- **Statistics window** — From/To date pickers, app filter dropdown, keyboard/mouse separated totals, auto-refreshes every 10s, CSV export
+- **Keylogger log viewer** — View keylogger records filtered by date range and app in a themed ListView
+- **Mouse clicker** — Configurable interval (min/sec/ms), random offset, left/right button, continuous or limited mode, system-wide start/stop hotkeys with customisable bindings
+- **Dark mode** — Full dark theme including title bar, menu bar, list view, scrollbar, and all child windows (heatmap, stats, logs, clicker, settings, about)
+
+### System Integration
+- **System tray** — Minimises to tray on close/minimize; right-click for Show/Heatmap/Stats/Mouse Clicker/Toggle Keylogger/Settings/Quit
+- **Tray tooltip** — Shows today's total keypress count, updates every 10s
+- **Show/Hide hotkey** — Configurable system-wide shortcut (default Ctrl+Shift+K) to bring ksc to foreground when minimised or hidden
+- **Start minimised** — Option to launch directly to system tray
+- **Start with Windows** — Auto-launch via registry `Run` key toggle
+- **Single instance** — Named mutex prevents duplicate processes
+
+### Data Management
+- **CSV export** — All-time or date-filtered export with per-app breakdown
+- **Backup database** — Timestamped backup of `ksc.db` and `ksc_keylog.db` with one click
+- **Restore database** — Select a backup file to restore; app exits for clean restart
+- **Reset statistics** — Wipe all keypress/mouse data while preserving settings
+- **Delete keylogger logs** — Erase the keylogger database independently
+
+### Build & Distribution
+- **Self-signed code signing** — Authenticode signature with timestamp at build time; one-time trust command eliminates SmartScreen warnings
+- **Custom app icon** — Embedded icon resource, shown in all windows and Explorer
+- **Static linking** — Standalone `.exe` with zero runtime DLL dependencies
+- **VERSIONINFO resource** — File properties show version, company, product name
 
 ## Settings
 
-The settings dialog (File > Settings) provides four toggles:
+The settings dialog (File > Settings) provides:
 
 | Setting | Default | Description |
 |---|---|---|
 | Start with Windows | OFF | Launches ksc on Windows login (registry Run key) |
-| Start minimized to tray | OFF | Starts hidden in the system tray |
-| Dark mode | OFF | Full dark theme for all window elements |
-| Auto-refresh stats (10s) | ON | Refreshes the stats view every 10 seconds |
+| Start minimised to tray | OFF | Starts hidden in the system tray |
+| Dark mode | OFF | Full dark theme for all windows and components |
+| Auto-refresh stats (10s) | ON | Refreshes stats view every 10 seconds |
+| Enable Keylogger | OFF | Records all keypresses with timestamps to `ksc_keylog.db` |
+| Reset All Statistics | — | Deletes all keypress counts, keeps settings |
+| Delete Keylogger Logs | — | Deletes the keylogger database file |
+| Show KSC Shortcut | Ctrl+Shift+K | Configurable system-wide hotkey to show/hide |
 
 All settings persist in the SQLite database.
 
@@ -58,6 +79,7 @@ The script will:
 5. Self-sign the executable with a timestamp
 6. Copy `ksc.exe` to the project root
 7. Export the public certificate to `ksc.cer` and print the trust command
+8. Show source line counts (app + sqlite3)
 
 After the first build, run the trust command once (as Admin) to eliminate SmartScreen warnings:
 ```powershell
@@ -83,11 +105,12 @@ ksc/
 ├── build.ps1               Automated build script (PowerShell)
 ├── README.md               This file
 ├── src/
-│   ├── main.c              Entry point, mutex, message loop
-│   ├── keyhook.c/h         WH_KEYBOARD_LL + WH_MOUSE_LL hooks, per-app capture
-│   ├── database.c/h        SQLite operations, settings table, daily/app tracking
-│   ├── gui.c/h             Main window, heatmap, stats window, settings, dark mode
-│   ├── tray.c/h            System tray icon + right-click menu
+│   ├── main.c              Entry point, mutex, hotkey registration, message loop
+│   ├── keyhook.c/h         WH_KEYBOARD_LL + WH_MOUSE_LL hooks, per-app capture, keylogger toggle
+│   ├── database.c/h        SQLite ops, settings, daily/app tracking, batch writer thread
+│   ├── keylogdb.c/h        Separate keylogger database, batch writer thread
+│   ├── gui.c/h             All windows: main, settings, heatmap, stats, logs, clicker, dark mode
+│   ├── tray.c/h            System tray, tooltip, right-click menu
 │   ├── startup.c/h         Registry auto-start toggle
 │   ├── ksc.rc              Embedded icon + VERSIONINFO resource
 │   ├── resource.h          Resource IDs
@@ -95,20 +118,21 @@ ksc/
 └── sqlite3/                SQLite3 amalgamation (downloaded by build.ps1)
 ```
 
-## How It Works
+## Architecture
 
 ### Hook System
 
-Uses two low-level Windows hooks in a dedicated thread with its own message pump:
+Two low-level Windows hooks run in a dedicated thread with their own message pump:
 - `SetWindowsHookEx(WH_KEYBOARD_LL)` — captures all keystrokes system-wide
-- `SetWindowsHookEx(WH_MOUSE_LL)` — captures left and right mouse button clicks
+- `SetWindowsHookEx(WH_MOUSE_LL)` — captures left/right mouse button clicks
 
-Each event captures the foreground window title via `GetForegroundWindow()` + `GetWindowText()` for per-app tracking. Only non-repeating key-down and button-down events are recorded.
+Each event captures the foreground window title via `GetForegroundWindow()` + `GetWindowText()`. Events are pushed to a lock-free ring buffer (critical section protected) and flushed in batches by a background writer thread.
 
 ### Database
 
-Counts are stored in `%APPDATA%\KSC\ksc.db` with three tables:
+Two independent SQLite databases in `%APPDATA%\KSC\`:
 
+**ksc.db** — statistics and settings:
 ```sql
 key_counts          key_daily                     settings
 ──────────          ────────                      ────────
@@ -119,38 +143,39 @@ count     INT       app       TEXT   DEFAULT ''
                     PRIMARY KEY (key_code, date, app)
 ```
 
-- `key_counts` — all-time totals per key
-- `key_daily` — per-key-per-app-per-day granular counts for time-range and per-app queries
-- `settings` — user preferences (dark mode, auto-refresh, etc.)
+**ksc_keylog.db** — keylogger records:
+```sql
+keylog
+──────
+id         INTEGER PRIMARY KEY AUTOINCREMENT
+timestamp  TEXT     (YYYY-MM-DD HH:MM:SS)
+key_name   TEXT
+vk_code    INTEGER
+app        TEXT     DEFAULT ''
+```
 
-All inserts use upsert (`INSERT ... ON CONFLICT DO UPDATE`) with `SQLITE_OPEN_FULLMUTEX` for thread safety between the hook thread and the GUI thread.
+### Batch Write System
 
-### Key Heatmap
-
-A separate window draws a full QWERTY keyboard layout (~70 keys). Each key rectangle is colored on a dark-blue → teal → green → yellow → orange → red gradient based on its press count relative to the most-pressed key. A legend bar at the bottom shows the scale.
-
-### Statistics & Export
-
-The Stats window provides:
-- **From/To date pickers** — select any custom date range
-- **App filter dropdown** — populated from `SELECT DISTINCT app FROM key_daily`, defaults to "All apps"
-- **CSV Export** — exports `Key Code,Key Name,App,Count` for the selected date range and app filter
-
-The File > Export Data menu item exports all-time data (from `2000-01-01` to today) with full per-app breakdown.
+Each keystroke pushes an event to a 256-entry ring buffer. A dedicated writer thread wakes every ~100ms or on signal, drains the buffer inside a `BEGIN IMMEDIATE / COMMIT` transaction, and performs all upserts in a single SQLite journal write. This reduces per-event overhead from ~0.5ms to ~0.01ms amortised.
 
 ### Dark Mode
 
 Dark mode is implemented via undocumented `uxtheme.dll` ordinal exports loaded at runtime:
-
 - `SetPreferredAppMode(AllowDark)` (ordinal 135) — enables dark mode support app-wide
-- `AllowDarkModeForWindow` (ordinal 133) — opts individual windows into dark chrome (title bar, scrollbar)
+- `AllowDarkModeForWindow` (ordinal 133) — opts individual windows into dark chrome
 - `FlushMenuThemes` (ordinal 136) — refreshes menu rendering
+- `DwmSetWindowAttribute(DWMWA_USE_IMMERSIVE_DARK_MODE)` — dark title bar
+- `SetWindowTheme(hWnd, L"DarkMode_Explorer", NULL)` — dark ListView scrollbar
+- `NM_CUSTOMDRAW` — guaranteed dark item text/background
 
-Combined with `DwmSetWindowAttribute(DWMWA_USE_IMMERSIVE_DARK_MODE)` for the title bar and `SetWindowTheme(hWnd, L"DarkMode_Explorer", NULL)` for the ListView's dark scrollbar. Item coloring uses `NM_CUSTOMDRAW` for guaranteed dark appearance regardless of theme support.
+### System-Wide Hotkeys
 
-### Single Instance
+Three `RegisterHotKey`-based hotkeys processed via `WM_HOTKEY` in the main message loop:
+- **Show/Hide ksc** (default Ctrl+Shift+K)
+- **Start clicking** (default Ctrl+Shift+S)
+- **Stop clicking** (default Ctrl+Shift+X)
 
-A named mutex (`KSC_SingleInstance`) is created at startup. If the mutex already exists, the new process exits silently, preventing duplicate instances.
+All three work system-wide — including when minimised, in the tray, or over fullscreen applications.
 
 ## Tech Stack
 
@@ -164,6 +189,18 @@ A named mutex (`KSC_SingleInstance`) is created at startup. If the mutex already
 | Code signing | Self-signed Authenticode via PowerShell |
 | Linking | Fully static (no DLLs required) |
 | Theme | uxtheme + DWM APIs |
+
+## Future Development Goals
+
+- **Keyboard simulator** — companion to the mouse clicker; configurable key sequences with repeat and interval
+- **Session tracking** — detect app-switch boundaries, view sessions with duration and keypress counts
+- **Idle detection** — pause counting after N minutes of inactivity to reduce noise
+- **Portable mode** — detect `ksc.portable` file; store databases alongside the exe for USB use
+- **Per-app heatmap** — filter the heatmap by application
+- **Typing speed display** — approximate live WPM based on recent keystrokes
+- **Daily/weekly email reports** — scheduled CSV export and summary
+- **Split gui.c** — refactor monolithic 2.5k-line file into per-window modules
+- **Linux support** — replace Win32 hooks/UI with platform-appropriate equivalents (X11/Wayland)
 
 ## License
 

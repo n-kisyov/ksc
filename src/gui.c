@@ -1,6 +1,8 @@
 #include "gui.h"
 #include "ksc_private.h"
 #include "database.h"
+#include "keylogdb.h"
+#include "keyhook.h"
 #include "startup.h"
 #include "tray.h"
 #include "resource.h"
@@ -13,6 +15,8 @@ static HBRUSH g_hLvBrush = NULL;
 static HICON g_hAppIcon = NULL;
 static HWND g_hClickerWnd = NULL;
 static HWND g_hTotalLabel = NULL;
+
+static void format_shortcut(int packed, char *buf, int bufsize);
 
 typedef void (WINAPI *fnSetPreferredAppMode)(int mode);
 typedef BOOL (WINAPI *fnAllowDarkModeForWindow)(HWND hWnd, BOOL allow);
@@ -236,6 +240,8 @@ static void update_auto_refresh(HWND hWnd)
     }
 }
 
+static int g_setCapturing = 0;
+
 static LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg,
                                         WPARAM wParam, LPARAM lParam)
 {
@@ -278,6 +284,46 @@ static LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg,
         if (db_get_setting_int("auto_refresh", 1))
             SendDlgItemMessage(hWnd, IDC_AUTO_REFRESH_CHK,
                                BM_SETCHECK, BST_CHECKED, 0);
+
+        y += 28;
+        CreateWindow("BUTTON", "Enable Keylogger",
+                     WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                     20, y, 220, 22, hWnd,
+                     (HMENU)IDC_KEYLOGGER_CHK, g_hInst, NULL);
+        if (db_get_setting_int("keylogger_enabled", 0))
+            SendDlgItemMessage(hWnd, IDC_KEYLOGGER_CHK,
+                               BM_SETCHECK, BST_CHECKED, 0);
+
+        y += 30;
+        CreateWindow("BUTTON", "Delete Keylogger Logs",
+                     WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                     20, y, 160, 22, hWnd,
+                     (HMENU)IDC_DELETE_KEYLOG_BTN, g_hInst, NULL);
+
+        y += 30;
+        CreateWindow("BUTTON", "Reset All Statistics",
+                     WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                     20, y, 160, 22, hWnd,
+                     (HMENU)IDC_RESET_STATS_BTN, g_hInst, NULL);
+
+        y += 28;
+        CreateWindow(WC_STATIC, "Show KSC Shortcut:",
+                     WS_CHILD | WS_VISIBLE | SS_LEFT | SS_CENTERIMAGE,
+                     20, y, 140, 22, hWnd, NULL, g_hInst, NULL);
+        y += 24;
+        {
+            char buf[64];
+            format_shortcut(db_get_setting_int("show_ksc_shortcut",
+                (MOD_CONTROL | MOD_SHIFT) << 16 | 'K'), buf, sizeof(buf));
+            CreateWindow(WC_STATIC, buf,
+                         WS_CHILD | WS_VISIBLE | SS_SUNKEN | SS_CENTER,
+                         20, y, 140, 22, hWnd,
+                         (HMENU)IDC_HOTKEY_SHOW_LBL, g_hInst, NULL);
+        }
+        CreateWindow("BUTTON", "Set",
+                     WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                     168, y, 50, 22, hWnd,
+                     (HMENU)IDC_HOTKEY_SET_SHOW, g_hInst, NULL);
 
         y += 40;
         CreateWindow("BUTTON", "OK",
@@ -322,7 +368,69 @@ static LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg,
         return DefWindowProc(hWnd, msg, wParam, lParam);
     }
 
+    case WM_KEYDOWN:
+    case WM_SYSKEYDOWN:
+        if (g_setCapturing) {
+            int vk = (int)wParam;
+            if (vk == VK_CONTROL || vk == VK_SHIFT ||
+                vk == VK_MENU || vk == VK_LWIN || vk == VK_RWIN)
+                return 0;
+            int mod = 0;
+            if (GetAsyncKeyState(VK_CONTROL) & 0x8000) mod |= MOD_CONTROL;
+            if (GetAsyncKeyState(VK_SHIFT)   & 0x8000) mod |= MOD_SHIFT;
+            if (GetAsyncKeyState(VK_MENU)    & 0x8000) mod |= MOD_ALT;
+            if ((GetAsyncKeyState(VK_LWIN) | GetAsyncKeyState(VK_RWIN))
+                & 0x8000) mod |= MOD_WIN;
+            if (mod == 0) { g_setCapturing = 0; return 0; }
+            int packed = (mod << 16) | vk;
+            db_set_setting_int("show_ksc_shortcut", packed);
+            {
+                char buf[64];
+                format_shortcut(packed, buf, sizeof(buf));
+                SetDlgItemText(hWnd, IDC_HOTKEY_SHOW_LBL, buf);
+            }
+            {
+                HWND hMain = (HWND)GetWindowLongPtr(hWnd, GWLP_USERDATA);
+                UnregisterHotKey(hMain, HOTKEY_ID_SHOW_KSC);
+                RegisterHotKey(hMain, HOTKEY_ID_SHOW_KSC,
+                               mod | MOD_NOREPEAT, vk);
+            }
+            g_setCapturing = 0;
+            return 0;
+        }
+        break;
+
     case WM_COMMAND:
+        if (LOWORD(wParam) == IDC_DELETE_KEYLOG_BTN &&
+            HIWORD(wParam) == BN_CLICKED) {
+            keylog_delete_db();
+            int enabled = (SendDlgItemMessage(hWnd, IDC_KEYLOGGER_CHK,
+                            BM_GETCHECK, 0, 0) == BST_CHECKED);
+            if (enabled) keylog_open();
+            MessageBox(hWnd, "Keylogger database deleted.",
+                       "Keylogger", MB_OK | MB_ICONINFORMATION);
+            return 0;
+        }
+        if (LOWORD(wParam) == IDC_RESET_STATS_BTN &&
+            HIWORD(wParam) == BN_CLICKED) {
+            int res = MessageBox(hWnd,
+                "This will delete all keystroke and mouse click data.\n"
+                "Settings will be kept.\n\nContinue?",
+                "Reset Statistics", MB_YESNO | MB_ICONWARNING);
+            if (res == IDYES) {
+                db_reset_stats();
+                HWND hMain = (HWND)GetWindowLongPtr(hWnd, GWLP_USERDATA);
+                if (hMain) PostMessage(hMain, WM_THEME_CHANGED, 0, 0);
+            }
+            return 0;
+        }
+        if (LOWORD(wParam) == IDC_HOTKEY_SET_SHOW &&
+            HIWORD(wParam) == BN_CLICKED) {
+            g_setCapturing = 1;
+            SetDlgItemText(hWnd, IDC_HOTKEY_SHOW_LBL, "Press keys...");
+            SetFocus(hWnd);
+            return 0;
+        }
         if (LOWORD(wParam) == IDOK) {
             int startup = (SendDlgItemMessage(hWnd, IDC_STARTUP_CHK,
                             BM_GETCHECK, 0, 0) == BST_CHECKED);
@@ -332,11 +440,16 @@ static LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg,
                           BM_GETCHECK, 0, 0) == BST_CHECKED);
             int autoref = (SendDlgItemMessage(hWnd, IDC_AUTO_REFRESH_CHK,
                              BM_GETCHECK, 0, 0) == BST_CHECKED);
+            int keylogger = (SendDlgItemMessage(hWnd, IDC_KEYLOGGER_CHK,
+                                BM_GETCHECK, 0, 0) == BST_CHECKED);
 
             startup_set_enabled(startup);
             db_set_setting_int("start_minimized", minimized);
             db_set_setting_int("dark_mode", dark);
             db_set_setting_int("auto_refresh", autoref);
+            db_set_setting_int("keylogger_enabled", keylogger);
+            keyhook_set_keylogger_enabled(keylogger);
+            if (keylogger) keylog_open();
 
             HWND hMain = (HWND)GetWindowLongPtr(hWnd, GWLP_USERDATA);
             if (hMain) PostMessage(hMain, WM_THEME_CHANGED, 0, 0);
@@ -372,7 +485,7 @@ static void show_settings(HWND hParent)
 
     HWND hDlg = CreateWindow("KSC_Settings", "KSC Settings",
                  WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
-                 CW_USEDEFAULT, CW_USEDEFAULT, 280, 220,
+                 CW_USEDEFAULT, CW_USEDEFAULT, 280, 340,
                  hParent, NULL, g_hInst, hParent);
     ShowWindow(hDlg, SW_SHOW);
     UpdateWindow(hDlg);
@@ -1184,6 +1297,302 @@ static void export_all_data(HWND hParent)
     db_free_stats(stats);
 }
 
+typedef struct {
+    HWND hListView;
+    HWND hDateFrom;
+    HWND hDateTo;
+    HWND hAppCombo;
+} ViewLogsData;
+
+static void populate_logs_app_combo(HWND hCombo)
+{
+    SendMessage(hCombo, CB_RESETCONTENT, 0, 0);
+    SendMessage(hCombo, CB_ADDSTRING, 0, (LPARAM)"All apps");
+    char **apps = NULL;
+    int nApps = 0;
+    if (keylog_get_apps(&apps, &nApps)) {
+        for (int i = 0; i < nApps; i++)
+            SendMessage(hCombo, CB_ADDSTRING, 0, (LPARAM)apps[i]);
+        keylog_free_apps(apps, nApps);
+    }
+    SendMessage(hCombo, CB_SETCURSEL, 0, 0);
+}
+
+static void refresh_logs_list(ViewLogsData *d)
+{
+    if (!d || !d->hListView) return;
+
+    SendMessage(d->hListView, WM_SETREDRAW, FALSE, 0);
+    ListView_DeleteAllItems(d->hListView);
+
+    SYSTEMTIME stFrom, stTo;
+    LRESULT rFrom = SendMessage(d->hDateFrom,
+        DTM_GETSYSTEMTIME, 0, (LPARAM)&stFrom);
+    LRESULT rTo = SendMessage(d->hDateTo,
+        DTM_GETSYSTEMTIME, 0, (LPARAM)&stTo);
+    if (rFrom != GDT_VALID || rTo != GDT_VALID) {
+        SendMessage(d->hListView, WM_SETREDRAW, TRUE, 0);
+        return;
+    }
+
+    char from[16], to[16];
+    sprintf(from, "%04d-%02d-%02d",
+            stFrom.wYear, stFrom.wMonth, stFrom.wDay);
+    sprintf(to, "%04d-%02d-%02d",
+            stTo.wYear, stTo.wMonth, stTo.wDay);
+
+    const char *app = NULL;
+    int sel = (int)SendMessage(d->hAppCombo, CB_GETCURSEL, 0, 0);
+    if (sel > 0) {
+        static char buf[256];
+        buf[0] = '\0';
+        SendMessage(d->hAppCombo, CB_GETLBTEXT, sel, (LPARAM)buf);
+        if (buf[0]) app = buf;
+    }
+
+    KeylogEntry *entries = NULL;
+    int count = keylog_query(from, to, app, &entries);
+    if (!entries || count == 0) {
+        SendMessage(d->hListView, WM_SETREDRAW, TRUE, 0);
+        return;
+    }
+
+    LVITEM lvi;
+    memset(&lvi, 0, sizeof(lvi));
+    lvi.mask = LVIF_TEXT;
+
+    for (int i = 0; i < count; i++) {
+        lvi.iItem = i;
+        lvi.iSubItem = 0;
+        lvi.pszText = entries[i].timestamp;
+        ListView_InsertItem(d->hListView, &lvi);
+        ListView_SetItemText(d->hListView, i, 1, entries[i].key_name);
+        ListView_SetItemText(d->hListView, i, 2, entries[i].app);
+    }
+
+    keylog_free_entries(entries);
+    SendMessage(d->hListView, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(d->hListView, NULL, TRUE);
+}
+
+static LRESULT CALLBACK ViewLogsWndProc(HWND hWnd, UINT msg,
+                                         WPARAM wParam, LPARAM lParam)
+{
+    switch (msg) {
+    case WM_CREATE: {
+        ViewLogsData *d = calloc(1, sizeof(ViewLogsData));
+        if (!d) return -1;
+
+        int yTop = 10, dph = 22;
+
+        CreateWindow(WC_STATIC, "From:",
+                     WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
+                     10, yTop, 38, dph, hWnd, NULL, g_hInst, NULL);
+        d->hDateFrom = CreateWindow(DATETIMEPICK_CLASS, "",
+                         WS_CHILD | WS_VISIBLE |
+                         DTS_SHORTDATECENTURYFORMAT,
+                         50, yTop, 115, dph,
+                         hWnd, (HMENU)IDC_DATE_FROM, g_hInst, NULL);
+
+        CreateWindow(WC_STATIC, "To:",
+                     WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
+                     175, yTop, 22, dph, hWnd, NULL, g_hInst, NULL);
+        d->hDateTo = CreateWindow(DATETIMEPICK_CLASS, "",
+                       WS_CHILD | WS_VISIBLE |
+                       DTS_SHORTDATECENTURYFORMAT,
+                       200, yTop, 115, dph,
+                       hWnd, (HMENU)IDC_DATE_TO, g_hInst, NULL);
+
+        CreateWindow(WC_STATIC, "App:",
+                     WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
+                     325, yTop, 30, dph, hWnd, NULL, g_hInst, NULL);
+        d->hAppCombo = CreateWindow(WC_COMBOBOX, "",
+                         WS_CHILD | WS_VISIBLE |
+                         CBS_DROPDOWNLIST | WS_VSCROLL,
+                         358, yTop, 120, 200,
+                         hWnd, (HMENU)IDC_APP_COMBO, g_hInst, NULL);
+        populate_logs_app_combo(d->hAppCombo);
+
+        CreateWindow(WC_BUTTON, "Refresh",
+                     WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                     490, yTop - 1, 65, dph + 2,
+                     hWnd, (HMENU)IDC_STATS_REFRESH_BTN, g_hInst, NULL);
+
+        SYSTEMTIME stEnd, stMonthAgo;
+        GetLocalTime(&stEnd);
+        stMonthAgo = stEnd;
+        if (stMonthAgo.wMonth > 1)
+            stMonthAgo.wMonth--;
+        else { stMonthAgo.wMonth = 12; stMonthAgo.wYear--; }
+        SendMessage(d->hDateFrom, DTM_SETSYSTEMTIME, GDT_VALID,
+                    (LPARAM)&stMonthAgo);
+        SendMessage(d->hDateTo, DTM_SETSYSTEMTIME, GDT_VALID,
+                    (LPARAM)&stEnd);
+
+        HWND hLv = CreateWindow(WC_LISTVIEW, "",
+                    WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL,
+                    0, 42, 10, 10,
+                    hWnd, (HMENU)IDC_LISTVIEW, g_hInst, NULL);
+        ListView_SetExtendedListViewStyle(hLv,
+            LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES |
+            LVS_EX_DOUBLEBUFFER);
+
+        LVCOLUMN lvc;
+        memset(&lvc, 0, sizeof(lvc));
+        lvc.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
+        lvc.cx = 140;
+        lvc.pszText = "Timestamp";
+        ListView_InsertColumn(hLv, 0, &lvc);
+        lvc.cx = 100;
+        lvc.pszText = "Key";
+        ListView_InsertColumn(hLv, 1, &lvc);
+        lvc.cx = 320;
+        lvc.pszText = "App";
+        ListView_InsertColumn(hLv, 2, &lvc);
+
+        d->hListView = hLv;
+        SetWindowLongPtr(hWnd, GWLP_USERDATA, (LONG_PTR)d);
+
+        {
+            RECT rc;
+            GetClientRect(hWnd, &rc);
+            SetWindowPos(hLv, NULL, 0, 42, rc.right, rc.bottom - 42,
+                         SWP_NOZORDER);
+        }
+
+        /* apply dark mode */
+        {
+            BOOL dark = db_get_setting_int("dark_mode", 0);
+            if (dark) {
+                BOOL useDark = TRUE;
+                DwmSetWindowAttribute(hWnd,
+                    DWMWA_USE_IMMERSIVE_DARK_MODE,
+                    &useDark, sizeof(useDark));
+                if (g_pAllowDarkModeForWindow)
+                    g_pAllowDarkModeForWindow(hWnd, TRUE);
+                SetWindowPos(hWnd, NULL, 0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
+                    SWP_NOACTIVATE | SWP_FRAMECHANGED);
+                SetWindowTheme(hLv, L"DarkMode_Explorer", NULL);
+                ListView_SetBkColor(hLv, RGB(37, 37, 38));
+                ListView_SetTextBkColor(hLv, RGB(37, 37, 38));
+                ListView_SetTextColor(hLv, RGB(212, 212, 212));
+            }
+        }
+
+        refresh_logs_list(d);
+        return 0;
+    }
+
+    case WM_SIZE: {
+        ViewLogsData *d = (ViewLogsData *)GetWindowLongPtr(
+            hWnd, GWLP_USERDATA);
+        if (d && d->hListView) {
+            RECT rc;
+            GetClientRect(hWnd, &rc);
+            SetWindowPos(d->hListView, NULL, 0, 42,
+                         rc.right, rc.bottom - 42, SWP_NOZORDER);
+        }
+        return 0;
+    }
+
+    case WM_ERASEBKGND: {
+        BOOL dark = db_get_setting_int("dark_mode", 0);
+        if (dark && g_hDarkBrush) {
+            RECT rc;
+            GetClientRect(hWnd, &rc);
+            FillRect((HDC)wParam, &rc, g_hDarkBrush);
+            return TRUE;
+        }
+        return DefWindowProc(hWnd, msg, wParam, lParam);
+    }
+
+    case WM_CTLCOLORBTN:
+    case WM_CTLCOLORSTATIC: {
+        BOOL dark = db_get_setting_int("dark_mode", 0);
+        if (dark && g_hDarkBrush) {
+            HDC hdc = (HDC)wParam;
+            SetBkMode(hdc, TRANSPARENT);
+            SetTextColor(hdc, RGB(230, 230, 230));
+            return (LRESULT)g_hDarkBrush;
+        }
+        return DefWindowProc(hWnd, msg, wParam, lParam);
+    }
+
+    case WM_NOTIFY: {
+        NMHDR *nmh = (NMHDR *)lParam;
+        if (nmh->idFrom == IDC_LISTVIEW &&
+            nmh->code == NM_CUSTOMDRAW) {
+            BOOL dark = db_get_setting_int("dark_mode", 0);
+            if (dark) {
+                NMLVCUSTOMDRAW *lvcd = (NMLVCUSTOMDRAW *)lParam;
+                switch (lvcd->nmcd.dwDrawStage) {
+                case CDDS_PREPAINT:
+                    SetWindowLongPtr(hWnd, DWLP_MSGRESULT,
+                                     CDRF_NOTIFYITEMDRAW);
+                    return TRUE;
+                case CDDS_ITEMPREPAINT:
+                    lvcd->clrText   = RGB(212, 212, 212);
+                    lvcd->clrTextBk = RGB(37, 37, 38);
+                    SetWindowLongPtr(hWnd, DWLP_MSGRESULT,
+                                     CDRF_NEWFONT);
+                    return TRUE;
+                }
+            }
+        }
+        break;
+    }
+
+    case WM_COMMAND:
+        if (LOWORD(wParam) == IDC_STATS_REFRESH_BTN &&
+            HIWORD(wParam) == BN_CLICKED) {
+            ViewLogsData *d = (ViewLogsData *)GetWindowLongPtr(
+                hWnd, GWLP_USERDATA);
+            refresh_logs_list(d);
+        } else if (LOWORD(wParam) == IDC_APP_COMBO &&
+                   HIWORD(wParam) == CBN_SELCHANGE) {
+            ViewLogsData *d = (ViewLogsData *)GetWindowLongPtr(
+                hWnd, GWLP_USERDATA);
+            refresh_logs_list(d);
+        }
+        return 0;
+
+    case WM_CLOSE:
+        DestroyWindow(hWnd);
+        return 0;
+
+    case WM_DESTROY: {
+        ViewLogsData *d = (ViewLogsData *)GetWindowLongPtr(
+            hWnd, GWLP_USERDATA);
+        if (d) free(d);
+        return 0;
+    }
+    }
+    return DefWindowProc(hWnd, msg, wParam, lParam);
+}
+
+static void show_view_logs(HWND hParent)
+{
+    static BOOL registered = FALSE;
+    if (!registered) {
+        WNDCLASS wc = {0};
+        wc.lpfnWndProc = ViewLogsWndProc;
+        wc.hInstance = g_hInst;
+        wc.hIcon = g_hAppIcon;
+        wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+        wc.lpszClassName = "KSC_ViewLogs";
+        RegisterClass(&wc);
+        registered = TRUE;
+    }
+    HWND hDlg = CreateWindow("KSC_ViewLogs", "ksc - Keylogger Logs",
+                 WS_OVERLAPPEDWINDOW,
+                 CW_USEDEFAULT, CW_USEDEFAULT, 680, 440,
+                 hParent, NULL, g_hInst, NULL);
+    ShowWindow(hDlg, SW_SHOW);
+    UpdateWindow(hDlg);
+}
+
 static void format_shortcut(int packed, char *buf, int bufsize)
 {
     int vk = packed & 0xFFFF;
@@ -1764,8 +2173,12 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg,
         AppendMenu(hFileMenu, MF_STRING, IDM_SETTINGS, "Settings");
         AppendMenu(hFileMenu, MF_STRING, IDM_HEATMAP, "Key Heatmap");
         AppendMenu(hFileMenu, MF_STRING, IDM_STATS, "Stats");
+        AppendMenu(hFileMenu, MF_STRING, IDM_VIEW_LOGS, "View Logs");
         AppendMenu(hFileMenu, MF_STRING, IDM_EXPORT_CSV, "Export Data...");
         AppendMenu(hFileMenu, MF_STRING, IDM_MOUSE_CLICKER, "Mouse Clicker");
+        AppendMenu(hFileMenu, MF_SEPARATOR, 0, NULL);
+        AppendMenu(hFileMenu, MF_STRING, IDM_BACKUP_DB, "Backup Database...");
+        AppendMenu(hFileMenu, MF_STRING, IDM_RESTORE_DB, "Restore Database...");
         AppendMenu(hFileMenu, MF_SEPARATOR, 0, NULL);
         AppendMenu(hFileMenu, MF_STRING, IDM_QUIT, "Quit");
         AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hFileMenu, "File");
@@ -1847,6 +2260,7 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg,
     case WM_TIMER:
         if (wParam == ID_TIMER_REFRESH) {
             refresh_list_view();
+            tray_update_tip(hWnd, TRAY_ID);
         }
         return 0;
 
@@ -1872,6 +2286,15 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg,
         return 0;
 
     case WM_HOTKEY:
+        if (wParam == HOTKEY_ID_SHOW_KSC) {
+            if (IsWindowVisible(hWnd)) {
+                ShowWindow(hWnd, SW_HIDE);
+            } else {
+                ShowWindow(hWnd, SW_RESTORE);
+                SetForegroundWindow(hWnd);
+            }
+            return 0;
+        }
         if (g_hClickerWnd && IsWindow(g_hClickerWnd)) {
             if (wParam == HOTKEY_ID_START_CLICK) {
                 PostMessage(g_hClickerWnd, WM_CLICKER_CMD, 0, 0);
@@ -1900,12 +2323,91 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg,
         case IDM_STATS:
             show_stats_window(hWnd);
             break;
+        case IDM_VIEW_LOGS:
+            show_view_logs(hWnd);
+            break;
         case IDM_EXPORT_CSV:
             export_all_data(hWnd);
             break;
         case IDM_MOUSE_CLICKER:
             show_mouse_clicker(hWnd);
             break;
+        case IDM_KEYLOG_TOGGLE: {
+            int curr = db_get_setting_int("keylogger_enabled", 0);
+            int newv = curr ? 0 : 1;
+            db_set_setting_int("keylogger_enabled", newv);
+            keyhook_set_keylogger_enabled(newv);
+            if (newv) keylog_open();
+            MessageBox(hWnd,
+                newv ? "Keylogger enabled." : "Keylogger disabled.",
+                "Keylogger", MB_OK | MB_ICONINFORMATION);
+            break;
+        }
+        case IDM_BACKUP_DB: {
+            char appdata[MAX_PATH];
+            if (GetEnvironmentVariable("APPDATA", appdata, MAX_PATH) <= 0)
+                break;
+            char dir[256];
+            sprintf(dir, "%s\\KSC", appdata);
+            SYSTEMTIME st;
+            GetLocalTime(&st);
+            char ts[32];
+            sprintf(ts, "%04d%02d%02d_%02d%02d%02d",
+                    st.wYear, st.wMonth, st.wDay,
+                    st.wHour, st.wMinute, st.wSecond);
+            char src[300], dst[300];
+            sprintf(src, "%s\\ksc.db", dir);
+            sprintf(dst, "%s\\ksc_backup_%s.db", dir, ts);
+            if (CopyFile(src, dst, FALSE)) {
+                char klogSrc[300], klogDst[300];
+                sprintf(klogSrc, "%s\\ksc_keylog.db", dir);
+                sprintf(klogDst, "%s\\ksc_keylog_backup_%s.db",
+                        dir, ts);
+                CopyFile(klogSrc, klogDst, TRUE);
+                MessageBox(hWnd, "Backup created successfully.",
+                           "Backup", MB_OK | MB_ICONINFORMATION);
+            } else {
+                MessageBox(hWnd,
+                    "Backup failed. Is the database in use?",
+                    "Backup", MB_OK | MB_ICONERROR);
+            }
+            break;
+        }
+        case IDM_RESTORE_DB: {
+            OPENFILENAME ofn;
+            char filePath[MAX_PATH] = "";
+            ZeroMemory(&ofn, sizeof(ofn));
+            ofn.lStructSize = sizeof(ofn);
+            ofn.hwndOwner = hWnd;
+            ofn.lpstrFilter = "Database files (*.db)\0*.db\0\0";
+            ofn.lpstrFile = filePath;
+            ofn.nMaxFile = MAX_PATH;
+            ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+            if (!GetOpenFileName(&ofn)) break;
+            int res = MessageBox(hWnd,
+                "This will replace all current statistics.\n"
+                "ksc will exit. Restart manually.\n\nContinue?",
+                "Restore Database", MB_YESNO | MB_ICONWARNING);
+            if (res != IDYES) break;
+            char appdata2[MAX_PATH];
+            if (GetEnvironmentVariable("APPDATA", appdata2, MAX_PATH) <= 0)
+                break;
+            char dest[300];
+            sprintf(dest, "%s\\KSC\\ksc.db", appdata2);
+            db_close();
+            if (CopyFile(filePath, dest, FALSE)) {
+                MessageBox(hWnd,
+                    "Database restored. ksc will now exit.\n"
+                    "Please restart ksc manually.",
+                    "Restore", MB_OK | MB_ICONINFORMATION);
+                DestroyWindow(hWnd);
+            } else {
+                MessageBox(hWnd,
+                    "Restore failed. Ensure ksc is not running.",
+                    "Restore", MB_OK | MB_ICONERROR);
+            }
+            break;
+        }
         case IDM_REFRESH:
             refresh_list_view();
             break;

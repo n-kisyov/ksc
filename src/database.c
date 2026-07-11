@@ -4,6 +4,45 @@
 
 static sqlite3 *g_db = NULL;
 
+#define EVENT_BUF_SIZE 256
+
+typedef struct {
+    int key_code;
+    char key_name[64];
+    char app[256];
+} KeyEvent;
+
+static KeyEvent g_eventBuf[EVENT_BUF_SIZE];
+static int g_eventCount = 0;
+static int g_eventWrite = 0;
+static int g_eventRead  = 0;
+static CRITICAL_SECTION g_eventCs;
+static HANDLE g_eventSignal = NULL;
+static HANDLE g_writerThread = NULL;
+static volatile BOOL g_writerRunning = FALSE;
+
+static DWORD WINAPI db_writer_thread(LPVOID param)
+{
+    (void)param;
+    while (g_writerRunning) {
+        WaitForSingleObject(g_eventSignal, 100);
+
+        EnterCriticalSection(&g_eventCs);
+        if (g_eventCount > 0 && g_db) {
+            sqlite3_exec(g_db, "BEGIN IMMEDIATE", NULL, NULL, NULL);
+            while (g_eventCount > 0) {
+                const KeyEvent *e = &g_eventBuf[g_eventRead];
+                db_increment_key(e->key_code, e->key_name, e->app);
+                g_eventRead = (g_eventRead + 1) % EVENT_BUF_SIZE;
+                g_eventCount--;
+            }
+            sqlite3_exec(g_db, "COMMIT", NULL, NULL, NULL);
+        }
+        LeaveCriticalSection(&g_eventCs);
+    }
+    return 0;
+}
+
 static void get_today_date(char *buf, int bufsize)
 {
     SYSTEMTIME st;
@@ -79,11 +118,32 @@ int db_init(void)
         return 0;
     }
 
+    InitializeCriticalSection(&g_eventCs);
+    g_eventSignal = CreateEvent(NULL, FALSE, FALSE, NULL);
+    g_writerRunning = TRUE;
+    g_writerThread = CreateThread(NULL, 0, db_writer_thread,
+                                   NULL, 0, NULL);
+
     return 1;
 }
 
 void db_close(void)
 {
+    if (g_writerRunning) {
+        g_writerRunning = FALSE;
+        SetEvent(g_eventSignal);
+        if (g_writerThread) {
+            WaitForSingleObject(g_writerThread, 5000);
+            CloseHandle(g_writerThread);
+            g_writerThread = NULL;
+        }
+    }
+    if (g_eventSignal) {
+        CloseHandle(g_eventSignal);
+        g_eventSignal = NULL;
+    }
+    DeleteCriticalSection(&g_eventCs);
+
     if (g_db) {
         sqlite3_close(g_db);
         g_db = NULL;
@@ -338,4 +398,72 @@ void db_set_setting_int(const char *key, int value)
     sqlite3_bind_text(stmt, 2, buf, -1, SQLITE_STATIC);
     sqlite3_step(stmt);
     sqlite3_finalize(stmt);
+}
+
+void db_queue_event(int key_code, const char *key_name, const char *app)
+{
+    EnterCriticalSection(&g_eventCs);
+    if (g_eventCount < EVENT_BUF_SIZE) {
+        KeyEvent *e = &g_eventBuf[g_eventWrite];
+        e->key_code = key_code;
+        strncpy(e->key_name, key_name, 63);
+        e->key_name[63] = '\0';
+        if (app && app[0])
+            strncpy(e->app, app, 255);
+        else
+            e->app[0] = '\0';
+        e->app[255] = '\0';
+        g_eventWrite = (g_eventWrite + 1) % EVENT_BUF_SIZE;
+        g_eventCount++;
+    }
+    LeaveCriticalSection(&g_eventCs);
+    SetEvent(g_eventSignal);
+}
+
+void db_flush_events(void)
+{
+    if (!g_eventSignal) return;
+    EnterCriticalSection(&g_eventCs);
+    if (g_eventCount > 0 && g_db) {
+        sqlite3_exec(g_db, "BEGIN IMMEDIATE", NULL, NULL, NULL);
+        while (g_eventCount > 0) {
+            const KeyEvent *e = &g_eventBuf[g_eventRead];
+            db_increment_key(e->key_code, e->key_name, e->app);
+            g_eventRead = (g_eventRead + 1) % EVENT_BUF_SIZE;
+            g_eventCount--;
+        }
+        sqlite3_exec(g_db, "COMMIT", NULL, NULL, NULL);
+    }
+    LeaveCriticalSection(&g_eventCs);
+}
+
+void db_reset_stats(void)
+{
+    if (!g_db) return;
+    sqlite3_exec(g_db,
+        "DELETE FROM key_counts; DELETE FROM key_daily;",
+        NULL, NULL, NULL);
+}
+
+int64_t db_get_today_count(void)
+{
+    if (!g_db) return 0;
+    char today[16];
+    {
+        SYSTEMTIME st;
+        GetLocalTime(&st);
+        sprintf(today, "%04d-%02d-%02d",
+                st.wYear, st.wMonth, st.wDay);
+    }
+    const char *sql =
+        "SELECT SUM(count) FROM key_daily WHERE date = ?1;";
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return 0;
+    sqlite3_bind_text(stmt, 1, today, -1, SQLITE_STATIC);
+    int64_t total = 0;
+    if (sqlite3_step(stmt) == SQLITE_ROW)
+        total = sqlite3_column_int64(stmt, 0);
+    sqlite3_finalize(stmt);
+    return total;
 }

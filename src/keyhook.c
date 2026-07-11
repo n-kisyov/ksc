@@ -1,11 +1,13 @@
 #include "keyhook.h"
 #include "database.h"
+#include "keylogdb.h"
 #include "ksc_private.h"
 
 static HHOOK g_hKbHook = NULL;
 static HHOOK g_hMouseHook = NULL;
 static HANDLE g_thread = NULL;
 static DWORD g_thread_id = 0;
+static volatile BOOL g_keyloggerEnabled = FALSE;
 
 const char *keyhook_get_name(unsigned int vk_code)
 {
@@ -143,7 +145,9 @@ static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam,
             char app[256] = "";
             HWND hFg = GetForegroundWindow();
             if (hFg) GetWindowText(hFg, app, sizeof(app));
-            db_increment_key(p->vkCode, name, app);
+            db_queue_event(p->vkCode, name, app);
+            if (g_keyloggerEnabled)
+                keylog_queue_event(name, p->vkCode, app);
         }
     }
     return CallNextHookEx(NULL, nCode, wParam, lParam);
@@ -158,12 +162,18 @@ static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam,
             char app[256] = "";
             HWND hFg = GetForegroundWindow();
             if (hFg) GetWindowText(hFg, app, sizeof(app));
-            db_increment_key(VK_LBUTTON, keyhook_get_name(VK_LBUTTON), app);
+            db_queue_event(VK_LBUTTON, keyhook_get_name(VK_LBUTTON), app);
+            if (g_keyloggerEnabled)
+                keylog_queue_event(keyhook_get_name(VK_LBUTTON),
+                                    VK_LBUTTON, app);
         } else if (wParam == WM_RBUTTONDOWN) {
             char app[256] = "";
             HWND hFg = GetForegroundWindow();
             if (hFg) GetWindowText(hFg, app, sizeof(app));
-            db_increment_key(VK_RBUTTON, keyhook_get_name(VK_RBUTTON), app);
+            db_queue_event(VK_RBUTTON, keyhook_get_name(VK_RBUTTON), app);
+            if (g_keyloggerEnabled)
+                keylog_queue_event(keyhook_get_name(VK_RBUTTON),
+                                    VK_RBUTTON, app);
         }
     }
     return CallNextHookEx(NULL, nCode, wParam, lParam);
@@ -204,4 +214,9 @@ void keyhook_stop(void)
         g_thread = NULL;
         g_thread_id = 0;
     }
+}
+
+void keyhook_set_keylogger_enabled(int enabled)
+{
+    g_keyloggerEnabled = enabled ? TRUE : FALSE;
 }

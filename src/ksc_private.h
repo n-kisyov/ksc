@@ -42,6 +42,10 @@
 #define IDM_STATS              1007
 #define IDM_EXPORT_CSV         1008
 #define IDM_MOUSE_CLICKER      1009
+#define IDM_VIEW_LOGS          1010
+#define IDM_BACKUP_DB          1011
+#define IDM_RESTORE_DB         1012
+#define IDM_KEYLOG_TOGGLE       1013
 
 #define IDC_LISTVIEW            2001
 #define IDC_STARTUP_CHK          2002
@@ -69,9 +73,15 @@
 #define IDC_CLICK_BTN_START      2025
 #define IDC_CLICK_BTN_STOP       2026
 #define IDC_CLICK_STATUS         2027
+#define IDC_KEYLOGGER_CHK        2028
+#define IDC_DELETE_KEYLOG_BTN    2029
+#define IDC_RESET_STATS_BTN      2031
+#define IDC_HOTKEY_SHOW_LBL      2032
+#define IDC_HOTKEY_SET_SHOW      2033
 
 #define HOTKEY_ID_START_CLICK 100
 #define HOTKEY_ID_STOP_CLICK  101
+#define HOTKEY_ID_SHOW_KSC    102
 #define WM_CLICKER_CMD        (WM_APP + 5)
 
 #define ID_TIMER_REFRESH 1

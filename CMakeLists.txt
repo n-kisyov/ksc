@@ -20,6 +20,7 @@ set(SOURCES
     src/main.c
     src/keyhook.c
     src/database.c
+    src/keylogdb.c
     src/gui.c
     src/tray.c
     src/startup.c

@@ -1,6 +1,7 @@
 #include "ksc_private.h"
 #include "keyhook.h"
 #include "database.h"
+#include "keylogdb.h"
 #include "gui.h"
 #include "tray.h"
 
@@ -26,12 +27,28 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         return 1;
     }
 
+    if (db_get_setting_int("keylogger_enabled", 0)) {
+        keylog_open();
+        keyhook_set_keylogger_enabled(1);
+    }
+
     gui_init_dark_mode();
 
     HWND hWnd = gui_create_main_window(hInstance);
     if (!hWnd) {
         db_close();
         return 1;
+    }
+
+    {
+        int sc = db_get_setting_int("show_ksc_shortcut",
+                   (MOD_CONTROL | MOD_SHIFT) << 16 | 'K');
+        if (sc > 0) {
+            int vk = sc & 0xFFFF;
+            int mod = (sc >> 16) & 0xFFFF;
+            RegisterHotKey(hWnd, HOTKEY_ID_SHOW_KSC,
+                           mod | MOD_NOREPEAT, vk);
+        }
     }
 
     if (!keyhook_start()) {
@@ -60,8 +77,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     }
 
     keyhook_stop();
+    db_flush_events();
+    keylog_flush_events();
+    UnregisterHotKey(NULL, HOTKEY_ID_SHOW_KSC);
     tray_cleanup(hWnd, TRAY_ID);
     db_close();
+    keylog_close();
 
     return (int)msg.wParam;
 }
