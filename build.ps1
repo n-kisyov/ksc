@@ -254,7 +254,7 @@ if (Test-Path "build\ksc.exe") {
     # Self-sign the executable
     Write-Host ""
     Write-Host "[INFO] Signing executable..."
-    $certSubject = "CN=bbounce.org ksc 0.9"
+    $certSubject = "CN=bbounce.org ksc 1.1"
     $cert = Get-ChildItem -Path Cert:\CurrentUser\My -CodeSigningCert |
             Where-Object { $_.Subject -eq $certSubject } |
             Select-Object -First 1

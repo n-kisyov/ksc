@@ -208,7 +208,7 @@ static void update_theme(HWND hWnd)
         if (hMenu) {
             MENUINFO mi = { sizeof(mi) };
             mi.fMask = MIM_BACKGROUND;
-            mi.hbrBack = NULL;
+            mi.hbrBack = GetSysColorBrush(COLOR_MENUBAR);
             SetMenuInfo(hMenu, &mi);
         }
 
@@ -3595,7 +3595,7 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg,
         case IDM_ABOUT:
             MessageBox(hWnd,
                 "ksc - Keystroke Counter\n"
-                "Version 0.9.5rc1\n\n"
+                "Version 1.1\n\n"
                 "Counts every keystroke on your keyboard.\n"
                 "Tracks per-application usage.\n"
                 "Stores counts in a SQLite database.\n\n"
