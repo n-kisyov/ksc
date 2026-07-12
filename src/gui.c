@@ -1732,8 +1732,8 @@ static DWORD WINAPI ClickerThreadProc(LPVOID param)
                                   NULL, FALSE);
     BOOL isLeft = (SendMessage(d->hBtnLeft, BM_GETCHECK, 0, 0)
                    == BST_CHECKED);
-    BOOL continuous = (SendMessage(d->hContinuous, BM_GETCHECK, 0, 0)
-                       == BST_CHECKED);
+    BOOL continuous = (SendMessage(d->hContinuous,
+                        BM_GETCHECK, 0, 0) == BST_CHECKED);
     int limit = GetDlgItemInt(hDlg, IDC_CLICK_LIMITED_COUNT,
                                NULL, FALSE);
 
@@ -2665,7 +2665,25 @@ typedef struct {
     int keyCount;
     int hotkeyStartId;
     int hotkeyStopId;
+    /* cached settings for the thread (no UI reads from thread) */
+    char cachedSeq[2048];
+    int  intervalMs;
+    int  offsetMs;
+    int  isContinuous;
+    int  limitCount;
 } KbSimData;
+
+/* manual strtok replacement for thread safety */
+static char *parse_next(char *str, char **ctx)
+{
+    if (str) *ctx = str;
+    if (!*ctx || !**ctx) return NULL;
+    while (**ctx == ' ') (*ctx)++;
+    char *start = *ctx;
+    while (**ctx && **ctx != ',') (*ctx)++;
+    if (**ctx == ',') { **ctx = '\0'; (*ctx)++; }
+    return start;
+}
 
 static void update_readable_label(KbSimData *d)
 {
@@ -2676,7 +2694,8 @@ static void update_readable_label(KbSimData *d)
         d->keyCount = 0;
         return;
     }
-    char *tok = strtok(hexText, ",");
+    char *ctx = NULL;
+    char *tok = parse_next(hexText, &ctx);
     int cnt = 0;
     while (tok && cnt < 128) {
         while (*tok == ' ') tok++;
@@ -2688,7 +2707,7 @@ static void update_readable_label(KbSimData *d)
             strcat(readable, tmp);
             cnt++;
         }
-        tok = strtok(NULL, ",");
+        tok = parse_next(NULL, &ctx);
     }
     d->keyCount = cnt;
     SetWindowText(d->hReadableLbl, readable);
@@ -2713,36 +2732,32 @@ static DWORD WINAPI KbSimThreadProc(LPVOID param)
     srand(GetTickCount());
     d->cyclesSoFar = 0;
 
-    HWND hDlg = GetParent(d->hBtnStart);
-    int intervalMs = GetDlgItemInt(hDlg, IDC_KBSIM_INT_MIN,
-                                    NULL, FALSE) * 60000
-                   + GetDlgItemInt(hDlg, IDC_KBSIM_INT_SEC,
-                                    NULL, FALSE) * 1000
-                   + GetDlgItemInt(hDlg, IDC_KBSIM_INT_MS,
-                                    NULL, FALSE);
-    int offsetMs = GetDlgItemInt(hDlg, IDC_KBSIM_OFFSET,
-                                  NULL, FALSE);
-    BOOL continuous = (SendMessage(d->hContinuous,
-                        BM_GETCHECK, 0, 0) == BST_CHECKED);
-    int limit = GetDlgItemInt(hDlg, IDC_KBSIM_LIMIT, NULL, FALSE);
-    if (intervalMs < 10) intervalMs = 10;
-
-    /* read sequence from label */
-    char seqText[1024];
-    GetWindowText(d->hSeqLbl, seqText, sizeof(seqText));
-    if (seqText[0] == '\0') { d->running = FALSE; return 0; }
-
-    /* parse hex sequence: "0x00030053,0x00030058" -> array of packed ints */
+    /* copy cached values locally so the struct can be reused */
+    int intervalMs = d->intervalMs;
+    int offsetMs   = d->offsetMs;
+    int continuous = d->isContinuous;
+    int limit      = d->limitCount;
     int keys[64];
     int nKeys = 0;
-    char *tok = strtok(seqText, ",");
-    while (tok && nKeys < 64) {
-        while (*tok == ' ') tok++;
-        if (strncmp(tok, "0x", 2) == 0 || strncmp(tok, "0X", 2) == 0)
-            keys[nKeys++] = (int)strtol(tok, NULL, 16);
-        tok = strtok(NULL, ",");
+
+    /* parse cached hex sequence without strtok */
+    {
+        char buf[2048], *ctx = NULL;
+        strcpy(buf, d->cachedSeq);
+        char *tok = parse_next(buf, &ctx);
+        while (tok && nKeys < 64) {
+            while (*tok == ' ') tok++;
+            if ((tok[0] == '0' && (tok[1] == 'x' || tok[1] == 'X')) ||
+                (tok[0] == '0' && tok[1] == 'X'))
+                keys[nKeys++] = (int)strtol(tok, NULL, 16);
+            tok = parse_next(NULL, &ctx);
+        }
     }
-    if (nKeys == 0) { d->running = FALSE; return 0; }
+
+    if (nKeys == 0 || intervalMs < 10) {
+        d->running = FALSE;
+        return 0;
+    }
 
     while (d->running) {
         for (int i = 0; i < nKeys; i++) {
@@ -2752,26 +2767,23 @@ static DWORD WINAPI KbSimThreadProc(LPVOID param)
             int vk = packed & 0xFF;
             int mod = (packed >> 16) & 0xFFFF;
 
-            /* send modifiers */
-            INPUT modDown[4], modUp[4];
+            /* modifiers down */
+            INPUT modDown[4];
             int nM = 0;
-            if (mod & MOD_CONTROL) {
-                modDown[nM].type = INPUT_KEYBOARD;
-                modDown[nM].ki.wVk = VK_CONTROL; nM++;
-            }
-            if (mod & MOD_SHIFT) {
-                modDown[nM].type = INPUT_KEYBOARD;
-                modDown[nM].ki.wVk = VK_SHIFT; nM++;
-            }
-            if (mod & MOD_ALT) {
-                modDown[nM].type = INPUT_KEYBOARD;
-                modDown[nM].ki.wVk = VK_MENU; nM++;
-            }
-            if (mod & MOD_WIN) {
-                modDown[nM].type = INPUT_KEYBOARD;
-                modDown[nM].ki.wVk = VK_LWIN; nM++;
-            }
+            memset(modDown, 0, sizeof(modDown));
+            if (mod & MOD_CONTROL) { modDown[nM].type = INPUT_KEYBOARD; modDown[nM].ki.wVk = VK_CONTROL; nM++; }
+            if (mod & MOD_SHIFT)   { modDown[nM].type = INPUT_KEYBOARD; modDown[nM].ki.wVk = VK_SHIFT; nM++; }
+            if (mod & MOD_ALT)     { modDown[nM].type = INPUT_KEYBOARD; modDown[nM].ki.wVk = VK_MENU; nM++; }
+            if (mod & MOD_WIN)     { modDown[nM].type = INPUT_KEYBOARD; modDown[nM].ki.wVk = VK_LWIN; nM++; }
             if (nM > 0) SendInput(nM, modDown, sizeof(INPUT));
+
+            if (!d->running) { /* release mods and exit */
+                for (int j = 0; j < nM; j++) {
+                    modDown[j].ki.dwFlags = KEYEVENTF_KEYUP;
+                }
+                if (nM > 0) SendInput(nM, modDown, sizeof(INPUT));
+                break;
+            }
 
             /* key-down */
             INPUT kd;
@@ -2781,19 +2793,30 @@ static DWORD WINAPI KbSimThreadProc(LPVOID param)
             SendInput(1, &kd, sizeof(INPUT));
             Sleep(10);
 
+            if (!d->running) {
+                kd.ki.dwFlags = KEYEVENTF_KEYUP;
+                SendInput(1, &kd, sizeof(INPUT));
+                for (int j = 0; j < nM; j++) {
+                    modDown[j].ki.dwFlags = KEYEVENTF_KEYUP;
+                }
+                if (nM > 0) SendInput(nM, modDown, sizeof(INPUT));
+                break;
+            }
+
             /* key-up */
             kd.ki.dwFlags = KEYEVENTF_KEYUP;
             SendInput(1, &kd, sizeof(INPUT));
 
             /* release modifiers */
-            for (int j = 0; j < nM; j++) {
-                modUp[j] = modDown[j];
-                modUp[j].ki.dwFlags = KEYEVENTF_KEYUP;
-            }
-            if (nM > 0) SendInput(nM, modUp, sizeof(INPUT));
+            for (int j = 0; j < nM; j++)
+                modDown[j].ki.dwFlags = KEYEVENTF_KEYUP;
+            if (nM > 0) SendInput(nM, modDown, sizeof(INPUT));
 
             if (i < nKeys - 1) Sleep(10);
+            if (!d->running) break;
         }
+
+        if (!d->running) break;
 
         d->cyclesSoFar++;
         if (!continuous && d->cyclesSoFar >= limit) {
@@ -2806,9 +2829,16 @@ static DWORD WINAPI KbSimThreadProc(LPVOID param)
             int r = (rand() % (2 * offsetMs + 1)) - offsetMs;
             delay += r;
         }
-        if (delay < 10) delay = 10;
-        Sleep(delay);
+        if (delay < 5) delay = 5;
+
+        /* sleep in small chunks so stop is detected quickly */
+        while (delay > 0 && d->running) {
+            int chunk = delay > 50 ? 50 : delay;
+            Sleep(chunk);
+            delay -= chunk;
+        }
     }
+
     return 0;
 }
 
@@ -3221,7 +3251,17 @@ static LRESULT CALLBACK KeyboardSimWndProc(HWND hWnd, UINT msg,
                                    continuous ? 1 : 0);
                 db_set_setting_int("kbsim_limited_count",
                     GetDlgItemInt(hWnd, IDC_KBSIM_LIMIT,
-                                  NULL, FALSE));
+                                   NULL, FALSE));
+
+                /* cache settings for the thread (no UI reads) */
+                GetWindowText(d->hSeqLbl, d->cachedSeq,
+                              sizeof(d->cachedSeq));
+                d->intervalMs = intervalMs;
+                d->offsetMs = GetDlgItemInt(hWnd, IDC_KBSIM_OFFSET,
+                                             NULL, FALSE);
+                d->isContinuous = continuous ? 1 : 0;
+                d->limitCount = GetDlgItemInt(hWnd, IDC_KBSIM_LIMIT,
+                                               NULL, FALSE);
 
                 PostMessage(hWnd, WM_KBSIM_CMD, 0, 0);
                 return 0;
