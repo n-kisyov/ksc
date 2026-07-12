@@ -24,6 +24,7 @@ set(SOURCES
     src/cloudsync.c
     src/http_win.c
     src/json_micro.c
+    src/ssh_sync.c
     src/gui.c
     src/tray.c
     src/startup.c
@@ -32,7 +33,7 @@ set(SOURCES
 
 add_executable(ksc WIN32 ${SOURCES})
 
-target_include_directories(ksc PRIVATE src)
+target_include_directories(ksc PRIVATE src "${CMAKE_SOURCE_DIR}/libssh2/include")
 
 target_compile_definitions(ksc PRIVATE _CRT_SECURE_NO_WARNINGS)
 
@@ -47,4 +48,5 @@ target_link_libraries(ksc PRIVATE
     crypt32
     ws2_32
     winhttp
+    "${CMAKE_SOURCE_DIR}/libssh2/libssh2.a"
 )

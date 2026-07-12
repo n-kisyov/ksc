@@ -6,6 +6,7 @@
 #include "startup.h"
 #include "tray.h"
 #include "cloudsync.h"
+#include "ssh_sync.h"
 #include "resource.h"
 
 static HINSTANCE g_hInst = NULL;
@@ -2252,6 +2253,60 @@ static LRESULT CALLBACK CloudBackupWndProc(HWND hWnd, UINT msg,
                      (HMENU)IDC_CLOUD_BACKUP_NOW, g_hInst, NULL);
 
         y += 36;
+        CreateWindow(WC_STATIC, "\x1a\x1a\x1a SSH Target \x1a\x1a\x1a",
+                     WS_CHILD | WS_VISIBLE | SS_CENTER,
+                     10, y, 620, h, hWnd, NULL, g_hInst, NULL);
+        y += 26;
+        {
+            CreateWindow(WC_STATIC, "Host:",
+                         WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
+                         10, y, 40, h, hWnd, NULL, g_hInst, NULL);
+            CreateWindow(WC_EDIT, "",
+                         WS_CHILD | WS_VISIBLE | WS_BORDER,
+                         52, y, 180, h, hWnd,
+                         (HMENU)IDC_SSH_HOST, g_hInst, NULL);
+            CreateWindow(WC_STATIC, "Port:",
+                         WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
+                         242, y, 32, h, hWnd, NULL, g_hInst, NULL);
+            CreateWindow(WC_EDIT, "22",
+                         WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER,
+                         278, y, 55, h, hWnd,
+                         (HMENU)IDC_SSH_PORT, g_hInst, NULL);
+        }
+        y += 26;
+        {
+            CreateWindow(WC_STATIC, "User:",
+                         WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
+                         10, y, 40, h, hWnd, NULL, g_hInst, NULL);
+            CreateWindow(WC_EDIT, "",
+                         WS_CHILD | WS_VISIBLE | WS_BORDER,
+                         52, y, 140, h, hWnd,
+                         (HMENU)IDC_SSH_USER, g_hInst, NULL);
+            CreateWindow(WC_STATIC, "Pass:",
+                         WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
+                         202, y, 36, h, hWnd, NULL, g_hInst, NULL);
+            CreateWindow(WC_EDIT, "",
+                         WS_CHILD | WS_VISIBLE | WS_BORDER | ES_PASSWORD,
+                         242, y, 140, h, hWnd,
+                         (HMENU)IDC_SSH_PASS, g_hInst, NULL);
+        }
+        y += 30;
+        CreateWindow(WC_BUTTON, "Test Connection",
+                     WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                     10, y, 110, h, hWnd,
+                     (HMENU)IDC_SSH_TEST, g_hInst, NULL);
+        CreateWindow(WC_BUTTON, "Save SSH Config",
+                     WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                     130, y, 120, h, hWnd,
+                     (HMENU)IDC_SSH_SAVE, g_hInst, NULL);
+
+        ssh_sync_load_config(
+            GetDlgItem(hWnd, IDC_SSH_HOST),
+            GetDlgItem(hWnd, IDC_SSH_PORT),
+            GetDlgItem(hWnd, IDC_SSH_USER),
+            GetDlgItem(hWnd, IDC_SSH_PASS));
+
+        y += 34;
         CreateWindow(WC_STATIC, "Sync History:",
                      WS_CHILD | WS_VISIBLE | SS_LEFT,
                      10, y, 120, h, hWnd, NULL, g_hInst, NULL);
@@ -2293,7 +2348,7 @@ static LRESULT CALLBACK CloudBackupWndProc(HWND hWnd, UINT msg,
         if (d && d->hListView) {
             RECT rc;
             GetClientRect(hWnd, &rc);
-            int y = 180;
+            int y = 296;
             SetWindowPos(d->hListView, NULL, 0, y,
                          rc.right, rc.bottom - y, SWP_NOZORDER);
         }
@@ -2398,11 +2453,34 @@ static LRESULT CALLBACK CloudBackupWndProc(HWND hWnd, UINT msg,
             return 0;
         }
 
+        if (id == IDC_SSH_TEST &&
+            HIWORD(wParam) == BN_CLICKED) {
+            ssh_sync_save_config(
+                GetDlgItem(hWnd, IDC_SSH_HOST),
+                GetDlgItem(hWnd, IDC_SSH_PORT),
+                GetDlgItem(hWnd, IDC_SSH_USER),
+                GetDlgItem(hWnd, IDC_SSH_PASS));
+            ssh_sync_test(hWnd);
+            return 0;
+        }
+
+        if (id == IDC_SSH_SAVE &&
+            HIWORD(wParam) == BN_CLICKED) {
+            ssh_sync_save_config(
+                GetDlgItem(hWnd, IDC_SSH_HOST),
+                GetDlgItem(hWnd, IDC_SSH_PORT),
+                GetDlgItem(hWnd, IDC_SSH_USER),
+                GetDlgItem(hWnd, IDC_SSH_PASS));
+            return 0;
+        }
+
         if (id == IDC_CLOUD_BACKUP_NOW &&
             HIWORD(wParam) == BN_CLICKED) {
-            if (!d->loggedIn) {
-                MessageBox(hWnd, "Please login first.",
-                           "Cloud Backup", MB_OK | MB_ICONINFORMATION);
+            if (!d->loggedIn && !ssh_sync_is_configured()) {
+                MessageBox(hWnd,
+                    "No backup target configured.\n"
+                    "Login to Google Drive or set up SSH.",
+                    "Cloud Backup", MB_OK | MB_ICONINFORMATION);
                 return 0;
             }
             SetWindowText(d->hStatus,
@@ -2465,7 +2543,7 @@ static void show_cloud_backup(HWND hParent)
     }
     HWND hDlg = CreateWindow("KSC_CloudBackup", "ksc - Cloud Backup",
                  WS_OVERLAPPEDWINDOW,
-                 CW_USEDEFAULT, CW_USEDEFAULT, 640, 540,
+                 CW_USEDEFAULT, CW_USEDEFAULT, 640, 680,
                  hParent, NULL, g_hInst, NULL);
     ShowWindow(hDlg, SW_SHOW);
     UpdateWindow(hDlg);

@@ -82,6 +82,75 @@ if (Test-Path $SqliteC) {
     Write-Host "[OK] SQLite3 amalgamation downloaded and extracted."
 }
 
+# Download libssh2 if not present
+if (-not (Test-Path "libssh2\include\libssh2.h")) {
+    Write-Host "[INFO] libssh2 not found. Downloading..."
+
+    $LsshDir = "libssh2"
+    if (-not (Test-Path $LsshDir)) {
+        New-Item -ItemType Directory -Path $LsshDir | Out-Null
+    }
+    $LsshUrl = "https://www.libssh2.org/download/libssh2-1.11.0.tar.gz"
+    $LsshTgz = "$LsshDir\libssh2.tar.gz"
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        Invoke-WebRequest -Uri $LsshUrl -OutFile $LsshTgz -UseBasicParsing
+    } catch {
+        Write-Host "[ERROR] Failed to download libssh2."
+        Write-Host "Download manually from https://www.libssh2.org/download/"
+        Write-Host "Extract to libssh2/ and rebuild."
+        exit 1
+    }
+
+    Write-Host "[INFO] Extracting libssh2..."
+    $LsshTemp = "$LsshDir\temp"
+    try {
+        New-Item -ItemType Directory -Path $LsshTemp -Force | Out-Null
+        & tar -xzf $LsshTgz -C $LsshTemp 2>$null
+    } catch {
+        Write-Host "[ERROR] Failed to extract libssh2 (tar not found?)."
+        exit 1
+    }
+
+    $Extracted = Get-ChildItem -Path $LsshTemp -Directory | Select-Object -First 1
+    if (-not $Extracted) {
+        Write-Host "[ERROR] Unexpected libssh2 archive structure."
+        exit 1
+    }
+    $LsshSrc = $Extracted.FullName
+
+    Write-Host "[INFO] Building libssh2 (WinCNG, static)..."
+    $LsshBld = "$LsshDir\build"
+    New-Item -ItemType Directory -Path $LsshBld -Force | Out-Null
+
+    Push-Location $LsshBld
+    try {
+        & cmake $LsshSrc -G "MinGW Makefiles" `
+            -DCRYPTO_BACKEND=WinCNG `
+            -DBUILD_SHARED_LIBS=OFF `
+            -DBUILD_EXAMPLES=OFF `
+            -DBUILD_TESTING=OFF `
+            -DENABLE_ZLIB_COMPRESSION=OFF `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_C_COMPILER=gcc
+        if ($LASTEXITCODE -ne 0) { throw "cmake failed" }
+        & cmake --build . --config Release
+        if ($LASTEXITCODE -ne 0) { throw "build failed" }
+    } finally {
+        Pop-Location
+    }
+
+    # Copy headers and lib to expected locations
+    Copy-Item -Path "$LsshSrc\include\*" -Destination "$LsshDir\include\" -Recurse -Force
+    Copy-Item -Path "$LsshBld\src\libssh2.a" -Destination "$LsshDir\libssh2.a" -Force
+    Remove-Item -Recurse -Force $LsshTemp -ErrorAction SilentlyContinue
+    Remove-Item -Force $LsshTgz -ErrorAction SilentlyContinue
+
+    Write-Host "[OK] libssh2 built."
+} else {
+    Write-Host "[OK] libssh2 found."
+}
+
 # Build
 Write-Host ""
 Write-Host "[INFO] Generating application icon..."

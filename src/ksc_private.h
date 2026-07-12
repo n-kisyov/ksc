@@ -90,6 +90,12 @@
 #define IDC_CLOUD_SCHED_DAILY    2042
 #define IDC_CLOUD_BACKUP_NOW     2043
 #define IDC_CLOUD_LISTVIEW       2044
+#define IDC_SSH_HOST             2045
+#define IDC_SSH_PORT             2046
+#define IDC_SSH_USER             2047
+#define IDC_SSH_PASS             2048
+#define IDC_SSH_TEST             2049
+#define IDC_SSH_SAVE             2050
 
 #define HOTKEY_ID_START_CLICK 100
 #define HOTKEY_ID_STOP_CLICK  101

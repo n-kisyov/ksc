@@ -1,6 +1,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include "cloudsync.h"
+#include "ssh_sync.h"
 #include "ksc_private.h"
 #include <dpapi.h>
 #include <winhttp.h>
@@ -295,25 +296,66 @@ static DWORD WINAPI cloudsync_backup_thread(LPVOID param)
 
     if (nFiles == 0) goto done;
 
-    /* upload to Drive */
-    for (int i = 0; i < nFiles; i++) {
-        sprintf(localBak, "%s\\%s", dir, bakNames[i]);
+    int driveConfigured = g_loggedIn ? 1 : 0;
+    int sshConfigured = ssh_sync_is_configured();
+    int driveOK = !driveConfigured; /* trivially OK if not configured */
+    int sshOK   = !sshConfigured;
 
-        char url[512];
-        sprintf(url, "https://www.googleapis.com/upload/drive/v3/files"
+    /* upload to Google Drive */
+    if (driveConfigured) {
+        if (!refresh_access_token()) goto skip_drive;
+        if (!ensure_ksc_folder())   goto skip_drive;
+
+        int ok = 1;
+        for (int i = 0; i < nFiles; i++) {
+            sprintf(localBak, "%s\\%s", dir, bakNames[i]);
+            char url[512];
+            sprintf(url,
+                "https://www.googleapis.com/upload/drive/v3/files"
                 "?uploadType=multipart");
-
-        char *r = NULL;
-        int st2 = 0;
-        http_upload_file(url, g_accessToken, localBak, bakNames[i],
-                         g_folderId, &r, &st2);
-        free(r);
-        DeleteFile(localBak);
-
-        int pct = (int)(((i + 1) * 100LL) / nFiles);
-        if (hCloudWnd)
-            PostMessage(hCloudWnd, WM_CLOUD_SYNC, pct, 0);
+            char *r = NULL;
+            int st2 = 0;
+            http_upload_file(url, g_accessToken, localBak,
+                             bakNames[i], g_folderId, &r, &st2);
+            if (st2 != 200) ok = 0;
+            free(r);
+            int pct = (int)(((i + 1) * 100LL) / nFiles);
+            if (hCloudWnd)
+                PostMessage(hCloudWnd, WM_CLOUD_SYNC, pct, 0);
+        }
+        driveOK = ok;
     }
+
+    /* upload to SSH */
+    skip_drive:
+    if (sshConfigured) {
+        int ok = 1;
+        for (int i = 0; i < nFiles; i++) {
+            sprintf(localBak, "%s\\%s", dir, bakNames[i]);
+            if (!ssh_sync_upload(localBak, bakNames[i]))
+                ok = 0;
+        }
+        sshOK = ok;
+    }
+
+    /* delete local files only if all configured targets succeeded */
+    if (driveOK && sshOK) {
+        for (int i = 0; i < nFiles; i++) {
+            sprintf(localBak, "%s\\%s", dir, bakNames[i]);
+            DeleteFile(localBak);
+        }
+    }
+
+    /* build status string */
+    char statusStr[32] = "";
+    if (driveConfigured)
+        strcat(statusStr, driveOK ? "Drive" : "Drive(fail)");
+    if (driveConfigured && sshConfigured)
+        strcat(statusStr, "+");
+    if (sshConfigured)
+        strcat(statusStr, sshOK ? "SSH" : "SSH(fail)");
+    if (statusStr[0] == '\0')
+        strcpy(statusStr, "none");
 
     /* save sync history */
     {
@@ -329,10 +371,10 @@ static DWORD WINAPI cloudsync_backup_thread(LPVOID param)
         char entry[512];
         sprintf(entry,
             "{\"ts\":\"%04d%02d%02dT%02d%02d%02d\","
-            "\"files\":\"%s\",\"size\":%d,\"status\":\"ok\"}",
+            "\"files\":\"%s\",\"size\":%d,\"status\":\"%s\"}",
             st.wYear, st.wMonth, st.wDay,
             st.wHour, st.wMinute, st.wSecond,
-            filesStr, totalSize);
+            filesStr, totalSize, statusStr);
 
         HANDLE hf = CreateFile(histPath, GENERIC_READ, 0, NULL,
                                 OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -607,7 +649,8 @@ void cloudsync_logout(void)
 
 void cloudsync_backup_trigger(HWND hCloudWnd)
 {
-    if (!g_loggedIn || g_backupInProgress) return;
+    if ((!g_loggedIn && !ssh_sync_is_configured()) || g_backupInProgress)
+        return;
     CreateThread(NULL, 0, cloudsync_backup_thread,
                   (LPVOID)hCloudWnd, 0, NULL);
 }
