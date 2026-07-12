@@ -39,14 +39,15 @@ target_compile_definitions(ksc PRIVATE _CRT_SECURE_NO_WARNINGS)
 
 target_link_libraries(ksc PRIVATE
     sqlite3
+    "${CMAKE_SOURCE_DIR}/libssh2/libssh2.a"
+    bcrypt
+    crypt32
+    ws2_32
     comctl32
     shell32
     advapi32
     uxtheme
     dwmapi
     comdlg32
-    crypt32
-    ws2_32
     winhttp
-    "${CMAKE_SOURCE_DIR}/libssh2/libssh2.a"
 )

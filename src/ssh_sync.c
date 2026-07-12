@@ -1,7 +1,7 @@
 #include "ssh_sync.h"
-#include "ksc_private.h"
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include "ksc_private.h"
 #include <dpapi.h>
 
 #include <libssh2.h>

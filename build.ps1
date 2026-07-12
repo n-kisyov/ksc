@@ -83,7 +83,8 @@ if (Test-Path $SqliteC) {
 }
 
 # Download libssh2 if not present
-if (-not (Test-Path "libssh2\include\libssh2.h")) {
+if (-not (Test-Path "libssh2\libssh2.a")) {
+    if (Test-Path "libssh2") { Remove-Item -Recurse -Force "libssh2" }
     Write-Host "[INFO] libssh2 not found. Downloading..."
 
     $LsshDir = "libssh2"
@@ -131,6 +132,7 @@ if (-not (Test-Path "libssh2\include\libssh2.h")) {
             -DBUILD_EXAMPLES=OFF `
             -DBUILD_TESTING=OFF `
             -DENABLE_ZLIB_COMPRESSION=OFF `
+            -DCMAKE_POLICY_VERSION_MINIMUM="3.5" `
             -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_C_COMPILER=gcc
         if ($LASTEXITCODE -ne 0) { throw "cmake failed" }
@@ -141,8 +143,14 @@ if (-not (Test-Path "libssh2\include\libssh2.h")) {
     }
 
     # Copy headers and lib to expected locations
+    New-Item -ItemType Directory -Path "$LsshDir\include" -Force | Out-Null
     Copy-Item -Path "$LsshSrc\include\*" -Destination "$LsshDir\include\" -Recurse -Force
-    Copy-Item -Path "$LsshBld\src\libssh2.a" -Destination "$LsshDir\libssh2.a" -Force
+    if (Test-Path "$LsshSrc\src\libssh2.a") {
+        Copy-Item -Path "$LsshSrc\src\libssh2.a" -Destination "$LsshDir\libssh2.a" -Force
+    }
+    if (Test-Path "$LsshBld\src\libssh2.a") {
+        Copy-Item -Path "$LsshBld\src\libssh2.a" -Destination "$LsshDir\libssh2.a" -Force
+    }
     Remove-Item -Recurse -Force $LsshTemp -ErrorAction SilentlyContinue
     Remove-Item -Force $LsshTgz -ErrorAction SilentlyContinue
 
