@@ -419,32 +419,53 @@ void cloudsync_login(HWND hParent)
     char codeVerifier[128] = "";
     char codeChallenge[128] = "";
     {
-        /* code_verifier: 64 random chars from allowed set */
-        const char *vc =
-            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
-        int vcLen = (int)strlen(vc);
-        srand(GetTickCount());
-        for (int i = 0; i < 64; i++)
-            codeVerifier[i] = vc[rand() % vcLen];
-        codeVerifier[64] = '\0';
+        /* PKCE: standard approach per RFC 7636
+           32 random bytes -> base64url (no padding) -> code_verifier
+           SHA256(code_verifier) -> base64url (no padding) -> code_challenge */
+        BYTE rnd[32];
+        HCRYPTPROV hProv = 0;
+        if (CryptAcquireContext(&hProv, NULL, NULL, PROV_RSA_FULL,
+                                 CRYPT_VERIFYCONTEXT)) {
+            CryptGenRandom(hProv, sizeof(rnd), rnd);
+            CryptReleaseContext(hProv, 0);
+        } else {
+            srand(GetTickCount());
+            for (int i = 0; i < 32; i++)
+                rnd[i] = (BYTE)(rand() % 256);
+        }
 
-        /* SHA256 of code_verifier */
+        /* base64url encode random bytes -> code_verifier */
+        const char *b64u =
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        {
+            int cp = 0;
+            for (int i = 0; i < 32; i += 3) {
+                int rem = 32 - i;
+                DWORD val = (rnd[i] << 16);
+                if (rem >= 2) val |= (rnd[i + 1] << 8);
+                if (rem >= 3) val |= rnd[i + 2];
+                codeVerifier[cp++] = b64u[(val >> 18) & 0x3F];
+                codeVerifier[cp++] = b64u[(val >> 12) & 0x3F];
+                if (rem >= 2) codeVerifier[cp++] = b64u[(val >> 6) & 0x3F];
+                if (rem >= 3) codeVerifier[cp++] = b64u[val & 0x3F];
+            }
+            codeVerifier[cp] = '\0';
+        }
+
+        /* SHA256 of code_verifier -> base64url encode -> code_challenge */
         HCRYPTPROV hProv2 = 0;
         HCRYPTHASH hHash = 0;
         if (CryptAcquireContext(&hProv2, NULL, NULL, PROV_RSA_FULL,
                                  CRYPT_VERIFYCONTEXT) &&
             CryptCreateHash(hProv2, CALG_SHA_256, 0, 0, &hHash)) {
-            CryptHashData(hHash, (BYTE *)codeVerifier, 64, 0);
+            CryptHashData(hHash, (BYTE *)codeVerifier,
+                          (DWORD)strlen(codeVerifier), 0);
             BYTE hash[32];
             DWORD hashLen = 32;
             CryptGetHashParam(hHash, HP_HASHVAL, hash, &hashLen, 0);
             CryptDestroyHash(hHash);
             CryptReleaseContext(hProv2, 0);
 
-            /* base64url encode (no padding) */
-            const char *b64u =
-                "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-                "abcdefghijklmnopqrstuvwxyz0123456789-_";
             int cp = 0;
             for (int i = 0; i < 32; i += 3) {
                 int rem = 32 - i;
