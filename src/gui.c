@@ -3021,7 +3021,11 @@ static LRESULT CALLBACK KeyboardSimWndProc(HWND hWnd, UINT msg,
             if (GetAsyncKeyState(VK_MENU)    & 0x8000) mod |= MOD_ALT;
             if ((GetAsyncKeyState(VK_LWIN) | GetAsyncKeyState(VK_RWIN))
                 & 0x8000) mod |= MOD_WIN;
-            if (mod == 0) { d->capturing = 0; return 0; }
+            if (mod == 0 && d->capturing != 1) {
+                d->capturing = 0;
+                SetWindowText(d->hRecordBtn, "Record");
+                return 0;
+            }
 
             if (d->capturing == 1) {
                 /* Record mode: append to sequence */
@@ -3111,7 +3115,10 @@ static LRESULT CALLBACK KeyboardSimWndProc(HWND hWnd, UINT msg,
                 if (d->capturing == 1) {
                     d->capturing = 0;
                     SetWindowText(d->hRecordBtn, "Record");
-                    if (GetWindowTextLength(d->hSeqLbl) == 0)
+                    /* clear the "Press key combo..." if that's all we have */
+                    char buf[1024];
+                    GetWindowText(d->hSeqLbl, buf, sizeof(buf));
+                    if (strcmp(buf, "Press key combo...") == 0)
                         SetWindowText(d->hSeqLbl, "");
                     return 0;
                 }
@@ -3135,6 +3142,16 @@ static LRESULT CALLBACK KeyboardSimWndProc(HWND hWnd, UINT msg,
                 return 0;
             }
             if (id == IDC_KBSIM_START) {
+                /* check sequence not empty */
+                char seqCheck[1024];
+                GetWindowText(d->hSeqLbl, seqCheck, sizeof(seqCheck));
+                if (seqCheck[0] == '\0') {
+                    MessageBox(hWnd,
+                        "No key sequence recorded.\n"
+                        "Click Record and press key combos first.",
+                        "Keyboard Sim", MB_OK | MB_ICONWARNING);
+                    return 0;
+                }
                 int intervalMs = GetDlgItemInt(hWnd,
                     IDC_KBSIM_INT_MIN, NULL, FALSE) * 60000
                     + GetDlgItemInt(hWnd,
