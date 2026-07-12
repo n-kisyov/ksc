@@ -14,4 +14,4 @@ CMakeUserPresets.json
 ksc.cer
 /build
 /libssh2
-/sqlite3
+
