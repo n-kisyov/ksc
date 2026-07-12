@@ -1,8 +1,6 @@
 #include "ksc_private.h"
 #include <winhttp.h>
 
-#pragma comment(lib, "winhttp.lib")
-
 static int http_do(const wchar_t *verb, const wchar_t *fullUrl,
                     const char *bearer, const char *body,
                     char **outResponse, int *outStatus)
@@ -12,12 +10,18 @@ static int http_do(const wchar_t *verb, const wchar_t *fullUrl,
 
     URL_COMPONENTS uc = {0};
     uc.dwStructSize = sizeof(uc);
-    wchar_t host[256] = {0}, path[2048] = {0};
+    wchar_t host[256] = {0}, path[2048] = {0}, extra[4096] = {0};
     uc.lpszHostName = host;
     uc.dwHostNameLength = 255;
     uc.lpszUrlPath = path;
     uc.dwUrlPathLength = 2047;
+    uc.lpszExtraInfo = extra;
+    uc.dwExtraInfoLength = 4095;
     if (!WinHttpCrackUrl(fullUrl, 0, 0, &uc)) return 0;
+
+    wchar_t fullPath[8192];
+    wcscpy(fullPath, path);
+    if (extra[0]) wcscat(fullPath, extra);
 
     HINTERNET hSession = WinHttpOpen(L"ksc/1.0",
         WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
@@ -30,7 +34,7 @@ static int http_do(const wchar_t *verb, const wchar_t *fullUrl,
 
     DWORD flags = (uc.nScheme == INTERNET_SCHEME_HTTPS)
                   ? WINHTTP_FLAG_SECURE : 0;
-    HINTERNET hRequest = WinHttpOpenRequest(hConnect, verb, path,
+    HINTERNET hRequest = WinHttpOpenRequest(hConnect, verb, fullPath,
         NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, flags);
     if (!hRequest) { WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return 0; }
 
@@ -97,7 +101,83 @@ int http_post_form(const char *url, const char *bearer,
 {
     wchar_t wurl[2048];
     MultiByteToWideChar(CP_UTF8, 0, url, -1, wurl, 2048);
-    return http_do(L"POST", wurl, bearer, body, response, status);
+
+    URL_COMPONENTS uc = {0};
+    uc.dwStructSize = sizeof(uc);
+    wchar_t host[256] = {0}, pth[2048] = {0}, xtra[4096] = {0};
+    uc.lpszHostName = host;
+    uc.dwHostNameLength = 255;
+    uc.lpszUrlPath = pth;
+    uc.dwUrlPathLength = 2047;
+    uc.lpszExtraInfo = xtra;
+    uc.dwExtraInfoLength = 4095;
+    WinHttpCrackUrl(wurl, 0, 0, &uc);
+
+    wchar_t fullPath[8192];
+    wcscpy(fullPath, pth);
+    if (xtra[0]) wcscat(fullPath, xtra);
+
+    HINTERNET hSession = WinHttpOpen(L"ksc/1.0",
+        WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+        WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!hSession) return 0;
+
+    HINTERNET hConnect = WinHttpConnect(hSession, host, 443, 0);
+    if (!hConnect) { WinHttpCloseHandle(hSession); return 0; }
+
+    HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"POST", fullPath,
+        NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+        WINHTTP_FLAG_SECURE);
+    if (!hRequest) { WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession); return 0; }
+
+    wchar_t whdr[2048];
+    if (bearer && bearer[0])
+        swprintf(whdr, 2048,
+            L"Content-Type: application/x-www-form-urlencoded\r\n"
+            L"Authorization: Bearer %S", bearer);
+    else
+        wcscpy(whdr,
+            L"Content-Type: application/x-www-form-urlencoded");
+    WinHttpAddRequestHeaders(hRequest, whdr, -1,
+        WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
+
+    DWORD bodyLen = (DWORD)strlen(body);
+    if (!WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS,
+            0, (LPVOID)body, bodyLen, bodyLen, 0)) {
+        WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession); return 0;
+    }
+    if (!WinHttpReceiveResponse(hRequest, NULL)) {
+        WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession); return 0;
+    }
+
+    DWORD httpStatus = 0, sz = sizeof(httpStatus);
+    WinHttpQueryHeaders(hRequest,
+        WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+        WINHTTP_HEADER_NAME_BY_INDEX, &httpStatus, &sz,
+        WINHTTP_NO_HEADER_INDEX);
+    *status = (int)httpStatus;
+
+    DWORD total = 0;
+    char *buf = NULL;
+    DWORD available = 0;
+    while (WinHttpQueryDataAvailable(hRequest, &available) && available > 0) {
+        char *tmp = realloc(buf, total + available + 1);
+        if (!tmp) { free(buf); break; }
+        buf = tmp;
+        DWORD read = 0;
+        WinHttpReadData(hRequest, buf + total, available, &read);
+        total += read;
+        buf[total] = '\0';
+    }
+
+    WinHttpCloseHandle(hRequest);
+    WinHttpCloseHandle(hConnect);
+    WinHttpCloseHandle(hSession);
+    *response = buf;
+    return 1;
 }
 
 int http_post_json(const char *url, const char *bearer,
@@ -108,23 +188,28 @@ int http_post_json(const char *url, const char *bearer,
 
     URL_COMPONENTS uc = {0};
     uc.dwStructSize = sizeof(uc);
-    wchar_t host[256] = {0}, pth[2048] = {0};
+    wchar_t host[256] = {0}, pth[2048] = {0}, xtra[4096] = {0};
     uc.lpszHostName = host;
     uc.dwHostNameLength = 255;
     uc.lpszUrlPath = pth;
     uc.dwUrlPathLength = 2047;
+    uc.lpszExtraInfo = xtra;
+    uc.dwExtraInfoLength = 4095;
     WinHttpCrackUrl(wurl, 0, 0, &uc);
+
+    wchar_t fullPath[8192];
+    wcscpy(fullPath, pth);
+    if (xtra[0]) wcscat(fullPath, xtra);
 
     HINTERNET hSession = WinHttpOpen(L"ksc/1.0",
         WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
         WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!hSession) return 0;
 
-    HINTERNET hConnect = WinHttpConnect(hSession, host,
-        uc.nPort ? uc.nPort : 443, 0);
+    HINTERNET hConnect = WinHttpConnect(hSession, host, 443, 0);
     if (!hConnect) { WinHttpCloseHandle(hSession); return 0; }
 
-    HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"POST", pth,
+    HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"POST", fullPath,
         NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
         WINHTTP_FLAG_SECURE);
     if (!hRequest) { WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return 0; }
@@ -147,12 +232,12 @@ int http_post_json(const char *url, const char *bearer,
         WinHttpCloseHandle(hSession); return 0;
     }
 
-    DWORD status = 0, sz = sizeof(status);
+    DWORD httpStatus = 0, sz = sizeof(httpStatus);
     WinHttpQueryHeaders(hRequest,
         WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-        WINHTTP_HEADER_NAME_BY_INDEX, &status, &sz,
+        WINHTTP_HEADER_NAME_BY_INDEX, &httpStatus, &sz,
         WINHTTP_NO_HEADER_INDEX);
-    *status = (int)status;
+    *status = (int)httpStatus;
 
     DWORD total = 0;
     char *buf = NULL;
@@ -193,7 +278,7 @@ int http_upload_file(const char *url, const char *bearer,
     char meta[512];
     sprintf(meta,
         "{\"name\":\"%s\",\"parents\":[\"%s\"]}",
-        remoteName, folderId ? folderId : "root");
+        remoteName, (folderId && folderId[0]) ? folderId : "root");
 
     char boundary[64];
     sprintf(boundary, "ksc_boundary_%lu", GetTickCount());
@@ -220,12 +305,18 @@ int http_upload_file(const char *url, const char *bearer,
 
     URL_COMPONENTS uc = {0};
     uc.dwStructSize = sizeof(uc);
-    wchar_t host[256] = {0}, pth[2048] = {0};
+    wchar_t host[256] = {0}, pth[2048] = {0}, xtra[4096] = {0};
     uc.lpszHostName = host;
     uc.dwHostNameLength = 255;
     uc.lpszUrlPath = pth;
     uc.dwUrlPathLength = 2047;
+    uc.lpszExtraInfo = xtra;
+    uc.dwExtraInfoLength = 4095;
     WinHttpCrackUrl(wurl, 0, 0, &uc);
+
+    wchar_t fullPath[8192];
+    wcscpy(fullPath, pth);
+    if (xtra[0]) wcscat(fullPath, xtra);
 
     HINTERNET hSession = WinHttpOpen(L"ksc/1.0",
         WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
@@ -235,7 +326,7 @@ int http_upload_file(const char *url, const char *bearer,
     HINTERNET hConnect = WinHttpConnect(hSession, host, 443, 0);
     if (!hConnect) { free(body); WinHttpCloseHandle(hSession); return 0; }
 
-    HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"POST", pth,
+    HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"POST", fullPath,
         NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
         WINHTTP_FLAG_SECURE);
     if (!hRequest) { free(body); WinHttpCloseHandle(hConnect);

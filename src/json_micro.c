@@ -1,6 +1,6 @@
 #include "ksc_private.h"
 
-static char *json_find_str(const char *json, const char *key)
+char *json_find_str(const char *json, const char *key)
 {
     char search[128];
     sprintf(search, "\"%s\"", key);
@@ -19,7 +19,7 @@ static char *json_find_str(const char *json, const char *key)
     return buf;
 }
 
-static int json_find_int(const char *json, const char *key, int def)
+int json_find_int(const char *json, const char *key, int def)
 {
     char search[128];
     sprintf(search, "\"%s\"", key);

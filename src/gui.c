@@ -2198,44 +2198,51 @@ static LRESULT CALLBACK CloudBackupWndProc(HWND hWnd, UINT msg,
         int xp = 20;
         CreateWindow(WC_BUTTON, "Off",
                      WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON | WS_GROUP,
-                     xp, y, 55, h, hWnd,
+                     xp, y, 50, h, hWnd,
                      (HMENU)IDC_CLOUD_SCHED_OFF, g_hInst, NULL);
         if (sched == 0) SendMessage(GetDlgItem(hWnd, IDC_CLOUD_SCHED_OFF),
                                      BM_SETCHECK, BST_CHECKED, 0);
-        xp += 65;
+        xp += 58;
+        CreateWindow(WC_BUTTON, "5 min",
+                     WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+                     xp, y, 62, h, hWnd,
+                     (HMENU)IDC_CLOUD_SCHED_5M, g_hInst, NULL);
+        if (sched == 1) SendMessage(GetDlgItem(hWnd, IDC_CLOUD_SCHED_5M),
+                                     BM_SETCHECK, BST_CHECKED, 0);
+        xp += 70;
         CreateWindow(WC_BUTTON, "15 min",
                      WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
-                     xp, y, 70, h, hWnd,
+                     xp, y, 65, h, hWnd,
                      (HMENU)IDC_CLOUD_SCHED_15M, g_hInst, NULL);
-        if (sched == 1) SendMessage(GetDlgItem(hWnd, IDC_CLOUD_SCHED_15M),
+        if (sched == 2) SendMessage(GetDlgItem(hWnd, IDC_CLOUD_SCHED_15M),
                                      BM_SETCHECK, BST_CHECKED, 0);
-        xp += 80;
+        xp += 73;
         CreateWindow(WC_BUTTON, "30 min",
                      WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
-                     xp, y, 70, h, hWnd,
+                     xp, y, 65, h, hWnd,
                      (HMENU)IDC_CLOUD_SCHED_30M, g_hInst, NULL);
-        if (sched == 2) SendMessage(GetDlgItem(hWnd, IDC_CLOUD_SCHED_30M),
+        if (sched == 3) SendMessage(GetDlgItem(hWnd, IDC_CLOUD_SCHED_30M),
                                      BM_SETCHECK, BST_CHECKED, 0);
-        xp += 80;
+        xp += 73;
         CreateWindow(WC_BUTTON, "1 hr",
                      WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
-                     xp, y, 65, h, hWnd,
+                     xp, y, 55, h, hWnd,
                      (HMENU)IDC_CLOUD_SCHED_1H, g_hInst, NULL);
-        if (sched == 3) SendMessage(GetDlgItem(hWnd, IDC_CLOUD_SCHED_1H),
+        if (sched == 4) SendMessage(GetDlgItem(hWnd, IDC_CLOUD_SCHED_1H),
                                      BM_SETCHECK, BST_CHECKED, 0);
-        xp += 75;
+        xp += 63;
         CreateWindow(WC_BUTTON, "12 hr",
                      WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
-                     xp, y, 65, h, hWnd,
+                     xp, y, 58, h, hWnd,
                      (HMENU)IDC_CLOUD_SCHED_12H, g_hInst, NULL);
-        if (sched == 4) SendMessage(GetDlgItem(hWnd, IDC_CLOUD_SCHED_12H),
+        if (sched == 5) SendMessage(GetDlgItem(hWnd, IDC_CLOUD_SCHED_12H),
                                      BM_SETCHECK, BST_CHECKED, 0);
-        xp += 75;
+        xp += 66;
         CreateWindow(WC_BUTTON, "Daily",
                      WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
-                     xp, y, 65, h, hWnd,
+                     xp, y, 55, h, hWnd,
                      (HMENU)IDC_CLOUD_SCHED_DAILY, g_hInst, NULL);
-        if (sched == 5) SendMessage(GetDlgItem(hWnd, IDC_CLOUD_SCHED_DAILY),
+        if (sched == 6) SendMessage(GetDlgItem(hWnd, IDC_CLOUD_SCHED_DAILY),
                                      BM_SETCHECK, BST_CHECKED, 0);
 
         y += 32;
@@ -2382,9 +2389,9 @@ static LRESULT CALLBACK CloudBackupWndProc(HWND hWnd, UINT msg,
             if (hMain) {
                 KillTimer(hMain, ID_TIMER_CLOUD_SYNC);
                 DWORD intervals[] = {
-                    0, 900000, 1800000, 3600000, 43200000, 86400000
+                    0, 300000, 900000, 1800000, 3600000, 43200000, 86400000
                 };
-                if (val > 0 && val <= 5)
+                if (val > 0 && val <= 6)
                     SetTimer(hMain, ID_TIMER_CLOUD_SYNC,
                              intervals[val], NULL);
             }
@@ -2533,9 +2540,9 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg,
         {
             int cs = cloudsync_get_schedule();
             DWORD intervals[] = {
-                0, 900000, 1800000, 3600000, 43200000, 86400000
+                0, 300000, 900000, 1800000, 3600000, 43200000, 86400000
             };
-            if (cs > 0 && cs <= 5)
+            if (cs > 0 && cs <= 6)
                 SetTimer(hWnd, ID_TIMER_CLOUD_SYNC,
                          intervals[cs], NULL);
         }
