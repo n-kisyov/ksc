@@ -126,6 +126,8 @@ if (-not (Test-Path "libssh2\libssh2.a")) {
 
     Push-Location $LsshBld
     try {
+        $env:PATH = $env:PATH -replace [regex]::Escape("C:\\Users\\nikolay\\Downloads\\w64devkit\\bin;"), ""
+        $env:PATH = "C:\msys64\ucrt64\bin;$env:PATH"
         & cmake $LsshSrc -G "MinGW Makefiles" `
             -DCRYPTO_BACKEND=OpenSSL `
             -DOPENSSL_ROOT_DIR=C:/msys64/ucrt64 `
@@ -137,7 +139,7 @@ if (-not (Test-Path "libssh2\libssh2.a")) {
             -DENABLE_MAC_NONE=OFF `
             -DCMAKE_POLICY_VERSION_MINIMUM="3.5" `
             -DCMAKE_BUILD_TYPE=Release `
-            -DCMAKE_C_COMPILER=gcc
+            -DCMAKE_C_COMPILER="$($gcc.Source)"
         if ($LASTEXITCODE -ne 0) { throw "cmake failed" }
         & cmake --build . --config Release
         if ($LASTEXITCODE -ne 0) { throw "build failed" }
@@ -216,11 +218,13 @@ New-Item -ItemType Directory -Path "build" | Out-Null
 
 Push-Location "build"
 try {
+    $env:PATH = $env:PATH -replace [regex]::Escape("C:\\Users\\nikolay\\Downloads\\w64devkit\\bin;"), ""
+    $env:PATH = "C:\msys64\ucrt64\bin;$env:PATH"
     $cmakeArgs = @(
         "..",
         "-G", "MinGW Makefiles",
         "-DCMAKE_BUILD_TYPE=Release",
-        "-DCMAKE_C_COMPILER=gcc"
+        "-DCMAKE_C_COMPILER=$($gcc.Source)"
     )
     & cmake @cmakeArgs
     if ($LASTEXITCODE -ne 0) {

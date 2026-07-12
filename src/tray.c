@@ -38,6 +38,7 @@ void tray_show_menu(HWND hWnd, UINT id)
     AppendMenu(hMenu, MF_STRING, IDM_HEATMAP, "Key Heatmap");
     AppendMenu(hMenu, MF_STRING, IDM_STATS, "Stats");
     AppendMenu(hMenu, MF_STRING, IDM_MOUSE_CLICKER, "Mouse Clicker");
+    AppendMenu(hMenu, MF_STRING, IDM_KEYBOARD_SIM, "Keyboard Sim");
     AppendMenu(hMenu, MF_STRING, IDM_KEYLOG_TOGGLE, "Toggle Keylogger");
     AppendMenu(hMenu, MF_SEPARATOR, 0, NULL);
     AppendMenu(hMenu, MF_STRING, IDM_SETTINGS, "Settings");

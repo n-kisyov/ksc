@@ -47,6 +47,7 @@
 #define IDM_RESTORE_DB         1012
 #define IDM_KEYLOG_TOGGLE       1013
 #define IDM_CLOUD_BACKUP        1014
+#define IDM_KEYBOARD_SIM        1015
 
 #define IDC_LISTVIEW            2001
 #define IDC_STARTUP_CHK          2002
@@ -96,12 +97,32 @@
 #define IDC_SSH_PASS             2048
 #define IDC_SSH_TEST             2049
 #define IDC_SSH_SAVE             2050
+#define IDC_KBSIM_SEQ_LBL        2051
+#define IDC_KBSIM_RECORD         2052
+#define IDC_KBSIM_INT_MIN        2053
+#define IDC_KBSIM_INT_SEC        2054
+#define IDC_KBSIM_INT_MS         2055
+#define IDC_KBSIM_OFFSET         2056
+#define IDC_KBSIM_CONT           2057
+#define IDC_KBSIM_LIMITED        2058
+#define IDC_KBSIM_LIMIT          2059
+#define IDC_KBSIM_SH_START       2060
+#define IDC_KBSIM_SH_STOP        2061
+#define IDC_KBSIM_SET_START      2062
+#define IDC_KBSIM_SET_STOP       2063
+#define IDC_KBSIM_START          2064
+#define IDC_KBSIM_STOP           2065
+#define IDC_KBSIM_STATUS         2066
+#define IDC_HEATMAP_APP_COMBO    2067
 
 #define HOTKEY_ID_START_CLICK 100
 #define HOTKEY_ID_STOP_CLICK  101
 #define HOTKEY_ID_SHOW_KSC    102
+#define HOTKEY_ID_START_KBSIM 103
+#define HOTKEY_ID_STOP_KBSIM  104
 #define WM_CLICKER_CMD        (WM_APP + 5)
 #define WM_CLOUD_SYNC          (WM_APP + 6)
+#define WM_KBSIM_CMD           (WM_APP + 7)
 
 #define ID_TIMER_REFRESH 1
 #define ID_TIMER_CLOUD_SYNC 2

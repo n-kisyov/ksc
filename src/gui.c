@@ -627,7 +627,8 @@ static COLORREF heat_color(int64_t count, int64_t max_count)
     return RGB(r, g, b);
 }
 
-static void draw_heatmap(HWND hWnd, HDC hdc, RECT *rcClient)
+static void draw_heatmap(HWND hWnd, HDC hdc, RECT *rcClient,
+                         const char *appFilter)
 {
     BOOL dark = db_get_setting_int("dark_mode", 0);
     COLORREF bgColor = dark ? RGB(40, 40, 45) : RGB(245, 245, 248);
@@ -641,16 +642,42 @@ static void draw_heatmap(HWND hWnd, HDC hdc, RECT *rcClient)
 
     int64_t counts[256] = {0};
     int64_t maxCount = 0;
-    KeyStat *stats = NULL;
-    int nStats = db_get_stats(&stats);
-    if (stats && nStats > 0) {
-        for (int i = 0; i < nStats; i++) {
-            if (stats[i].key_code >= 0 && stats[i].key_code < 256) {
-                counts[stats[i].key_code] = stats[i].count;
-                if (stats[i].count > maxCount) maxCount = stats[i].count;
-            }
+    if (appFilter && appFilter[0]) {
+        char today[16];
+        {
+            SYSTEMTIME st;
+            GetLocalTime(&st);
+            sprintf(today, "%04d-%02d-%02d",
+                    st.wYear, st.wMonth, st.wDay);
         }
-        db_free_stats(stats);
+        KeyStat *stats = NULL;
+        int nStats = db_get_date_range_stats("2000-01-01", today,
+                                              appFilter, 0, &stats);
+        if (stats && nStats > 0) {
+            for (int i = 0; i < nStats; i++) {
+                if (stats[i].key_code >= 0 &&
+                    stats[i].key_code < 256) {
+                    counts[stats[i].key_code] = stats[i].count;
+                    if (stats[i].count > maxCount)
+                        maxCount = stats[i].count;
+                }
+            }
+            db_free_stats(stats);
+        }
+    } else {
+        KeyStat *stats = NULL;
+        int nStats = db_get_stats(&stats);
+        if (stats && nStats > 0) {
+            for (int i = 0; i < nStats; i++) {
+                if (stats[i].key_code >= 0 &&
+                    stats[i].key_code < 256) {
+                    counts[stats[i].key_code] = stats[i].count;
+                    if (stats[i].count > maxCount)
+                        maxCount = stats[i].count;
+                }
+            }
+            db_free_stats(stats);
+        }
     }
 
     HFONT hFont = CreateFont(13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
@@ -734,6 +761,28 @@ static LRESULT CALLBACK HeatmapWndProc(HWND hWnd, UINT msg,
     case WM_CREATE: {
         SetTimer(hWnd, ID_TIMER_REFRESH, 10000, NULL);
 
+        HWND hCombo = CreateWindow(WC_COMBOBOX, "",
+                        WS_CHILD | WS_VISIBLE |
+                        CBS_DROPDOWNLIST | WS_VSCROLL,
+                        10, 293, 200, 200,
+                        hWnd, (HMENU)IDC_HEATMAP_APP_COMBO,
+                        g_hInst, NULL);
+        SendMessage(hCombo, CB_ADDSTRING, 0,
+                    (LPARAM)"All apps");
+        {
+            char **apps = NULL;
+            int nApps = 0;
+            extern int db_get_distinct_apps(char ***o, int *c);
+            if (db_get_distinct_apps(&apps, &nApps)) {
+                for (int i = 0; i < nApps; i++)
+                    SendMessage(hCombo, CB_ADDSTRING, 0,
+                                (LPARAM)apps[i]);
+                extern void db_free_apps(char **a, int c);
+                db_free_apps(apps, nApps);
+            }
+        }
+        SendMessage(hCombo, CB_SETCURSEL, 0, 0);
+
         BOOL dark = db_get_setting_int("dark_mode", 0);
         if (dark) {
             BOOL useDark = TRUE;
@@ -757,10 +806,30 @@ static LRESULT CALLBACK HeatmapWndProc(HWND hWnd, UINT msg,
         HDC hdc = BeginPaint(hWnd, &ps);
         RECT rc;
         GetClientRect(hWnd, &rc);
-        draw_heatmap(hWnd, hdc, &rc);
+
+        const char *appFilter = NULL;
+        {
+            HWND hCombo = GetDlgItem(hWnd, IDC_HEATMAP_APP_COMBO);
+            int sel = (int)SendMessage(hCombo, CB_GETCURSEL, 0, 0);
+            if (sel > 0) {
+                static char buf[256];
+                buf[0] = '\0';
+                SendMessage(hCombo, CB_GETLBTEXT, sel,
+                            (LPARAM)buf);
+                if (buf[0]) appFilter = buf;
+            }
+        }
+        draw_heatmap(hWnd, hdc, &rc, appFilter);
         EndPaint(hWnd, &ps);
         return 0;
     }
+
+    case WM_COMMAND:
+        if (HIWORD(wParam) == CBN_SELCHANGE &&
+            LOWORD(wParam) == IDC_HEATMAP_APP_COMBO) {
+            InvalidateRect(hWnd, NULL, TRUE);
+        }
+        return 0;
     case WM_CLOSE:
         KillTimer(hWnd, ID_TIMER_REFRESH);
         DestroyWindow(hWnd);
@@ -786,7 +855,7 @@ static void show_heatmap(HWND hParent)
 
     HWND hDlg = CreateWindow("KSC_Heatmap", "KSC - Key Heatmap",
                  WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
-                 CW_USEDEFAULT, CW_USEDEFAULT, 708, 330,
+                 CW_USEDEFAULT, CW_USEDEFAULT, 708, 370,
                  hParent, NULL, g_hInst, NULL);
     ShowWindow(hDlg, SW_SHOW);
     UpdateWindow(hDlg);
@@ -2576,6 +2645,580 @@ static void show_mouse_clicker(HWND hParent)
     UpdateWindow(hDlg);
 }
 
+typedef struct {
+    HWND hSeqLbl;
+    HWND hMinEdit, hSecEdit, hMsEdit;
+    HWND hOffsetEdit;
+    HWND hContinuous, hLimited;
+    HWND hLimitedCount;
+    HWND hShortStart, hShortStop;
+    HWND hBtnSetStart, hBtnSetStop;
+    HWND hBtnStart, hBtnStop;
+    HWND hStatus;
+    HWND hMainWnd;
+    HWND hRecordBtn;
+    volatile BOOL running;
+    HANDLE hThread;
+    int cyclesSoFar;
+    int capturing;
+    int hotkeyStartId;
+    int hotkeyStopId;
+} KbSimData;
+
+static void register_kbsim_hotkey(HWND hMain, int id, int shortcut)
+{
+    if (shortcut <= 0) return;
+    int vk = shortcut & 0xFFFF;
+    int mod = (shortcut >> 16) & 0xFFFF;
+    RegisterHotKey(hMain, id, mod | MOD_NOREPEAT, vk);
+}
+
+static void unregister_kbsim_hotkey(HWND hMain, int id)
+{
+    UnregisterHotKey(hMain, id);
+}
+
+static DWORD WINAPI KbSimThreadProc(LPVOID param)
+{
+    KbSimData *d = (KbSimData *)param;
+    srand(GetTickCount());
+    d->cyclesSoFar = 0;
+
+    HWND hDlg = GetParent(d->hBtnStart);
+    int intervalMs = GetDlgItemInt(hDlg, IDC_KBSIM_INT_MIN,
+                                    NULL, FALSE) * 60000
+                   + GetDlgItemInt(hDlg, IDC_KBSIM_INT_SEC,
+                                    NULL, FALSE) * 1000
+                   + GetDlgItemInt(hDlg, IDC_KBSIM_INT_MS,
+                                    NULL, FALSE);
+    int offsetMs = GetDlgItemInt(hDlg, IDC_KBSIM_OFFSET,
+                                  NULL, FALSE);
+    BOOL continuous = (SendMessage(d->hContinuous,
+                        BM_GETCHECK, 0, 0) == BST_CHECKED);
+    int limit = GetDlgItemInt(hDlg, IDC_KBSIM_LIMIT, NULL, FALSE);
+    if (intervalMs < 10) intervalMs = 10;
+
+    /* read sequence from label */
+    char seqText[1024];
+    GetWindowText(d->hSeqLbl, seqText, sizeof(seqText));
+    if (seqText[0] == '\0') { d->running = FALSE; return 0; }
+
+    /* parse hex sequence: "0x00030053,0x00030058" -> array of packed ints */
+    int keys[64];
+    int nKeys = 0;
+    char *tok = strtok(seqText, ",");
+    while (tok && nKeys < 64) {
+        while (*tok == ' ') tok++;
+        if (strncmp(tok, "0x", 2) == 0 || strncmp(tok, "0X", 2) == 0)
+            keys[nKeys++] = (int)strtol(tok, NULL, 16);
+        tok = strtok(NULL, ",");
+    }
+    if (nKeys == 0) { d->running = FALSE; return 0; }
+
+    while (d->running) {
+        for (int i = 0; i < nKeys; i++) {
+            if (!d->running) break;
+
+            int packed = keys[i];
+            int vk = packed & 0xFF;
+            int mod = (packed >> 16) & 0xFFFF;
+
+            /* send modifiers */
+            INPUT modDown[4], modUp[4];
+            int nM = 0;
+            if (mod & MOD_CONTROL) {
+                modDown[nM].type = INPUT_KEYBOARD;
+                modDown[nM].ki.wVk = VK_CONTROL; nM++;
+            }
+            if (mod & MOD_SHIFT) {
+                modDown[nM].type = INPUT_KEYBOARD;
+                modDown[nM].ki.wVk = VK_SHIFT; nM++;
+            }
+            if (mod & MOD_ALT) {
+                modDown[nM].type = INPUT_KEYBOARD;
+                modDown[nM].ki.wVk = VK_MENU; nM++;
+            }
+            if (mod & MOD_WIN) {
+                modDown[nM].type = INPUT_KEYBOARD;
+                modDown[nM].ki.wVk = VK_LWIN; nM++;
+            }
+            if (nM > 0) SendInput(nM, modDown, sizeof(INPUT));
+
+            /* key-down */
+            INPUT kd;
+            memset(&kd, 0, sizeof(kd));
+            kd.type = INPUT_KEYBOARD;
+            kd.ki.wVk = (WORD)vk;
+            SendInput(1, &kd, sizeof(INPUT));
+            Sleep(10);
+
+            /* key-up */
+            kd.ki.dwFlags = KEYEVENTF_KEYUP;
+            SendInput(1, &kd, sizeof(INPUT));
+
+            /* release modifiers */
+            for (int j = 0; j < nM; j++) {
+                modUp[j] = modDown[j];
+                modUp[j].ki.dwFlags = KEYEVENTF_KEYUP;
+            }
+            if (nM > 0) SendInput(nM, modUp, sizeof(INPUT));
+
+            if (i < nKeys - 1) Sleep(10);
+        }
+
+        d->cyclesSoFar++;
+        if (!continuous && d->cyclesSoFar >= limit) {
+            d->running = FALSE;
+            break;
+        }
+
+        int delay = intervalMs;
+        if (offsetMs > 0) {
+            int r = (rand() % (2 * offsetMs + 1)) - offsetMs;
+            delay += r;
+        }
+        if (delay < 10) delay = 10;
+        Sleep(delay);
+    }
+    return 0;
+}
+
+static LRESULT CALLBACK KeyboardSimWndProc(HWND hWnd, UINT msg,
+                                            WPARAM wParam, LPARAM lParam)
+{
+    switch (msg) {
+    case WM_CREATE: {
+        KbSimData *d = calloc(1, sizeof(KbSimData));
+        if (!d) return -1;
+        d->hotkeyStartId = HOTKEY_ID_START_KBSIM;
+        d->hotkeyStopId  = HOTKEY_ID_STOP_KBSIM;
+        {
+            CREATESTRUCT *cs = (CREATESTRUCT *)lParam;
+            d->hMainWnd = cs->hwndParent;
+        }
+
+        int y = 10, h = 22;
+
+        CreateWindow(WC_STATIC, "Key Sequence:",
+                     WS_CHILD | WS_VISIBLE | SS_LEFT,
+                     10, y, 100, h, hWnd, NULL, g_hInst, NULL);
+        d->hSeqLbl = CreateWindow(WC_STATIC, "",
+                       WS_CHILD | WS_VISIBLE | SS_SUNKEN | SS_CENTER,
+                       115, y, 260, h, hWnd,
+                       (HMENU)IDC_KBSIM_SEQ_LBL, g_hInst, NULL);
+        CreateWindow(WC_BUTTON, "Record",
+                     WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                     385, y, 55, h, hWnd,
+                     (HMENU)IDC_KBSIM_RECORD, g_hInst, NULL);
+        d->hRecordBtn = GetDlgItem(hWnd, IDC_KBSIM_RECORD);
+
+        y += 24;
+        CreateWindow(WC_STATIC, "Interval:",
+                     WS_CHILD | WS_VISIBLE | SS_LEFT,
+                     10, y, 55, h, hWnd, NULL, g_hInst, NULL);
+        y += 24;
+        d->hMinEdit = CreateWindow(WC_EDIT, "0",
+                        WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER,
+                        15, y, 50, h, hWnd,
+                        (HMENU)IDC_KBSIM_INT_MIN, g_hInst, NULL);
+        CreateWindow(WC_STATIC, "m",
+                     WS_CHILD | WS_VISIBLE | SS_LEFT,
+                     70, y + 2, 12, h, hWnd, NULL, g_hInst, NULL);
+        d->hSecEdit = CreateWindow(WC_EDIT, "1",
+                        WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER,
+                        90, y, 50, h, hWnd,
+                        (HMENU)IDC_KBSIM_INT_SEC, g_hInst, NULL);
+        CreateWindow(WC_STATIC, "s",
+                     WS_CHILD | WS_VISIBLE | SS_LEFT,
+                     145, y + 2, 12, h, hWnd, NULL, g_hInst, NULL);
+        d->hMsEdit = CreateWindow(WC_EDIT, "0",
+                        WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER,
+                        165, y, 50, h, hWnd,
+                        (HMENU)IDC_KBSIM_INT_MS, g_hInst, NULL);
+        CreateWindow(WC_STATIC, "ms",
+                     WS_CHILD | WS_VISIBLE | SS_LEFT,
+                     220, y + 2, 20, h, hWnd, NULL, g_hInst, NULL);
+
+        y += 28;
+        CreateWindow(WC_STATIC, "Random Offset:",
+                     WS_CHILD | WS_VISIBLE | SS_LEFT,
+                     10, y, 100, h, hWnd, NULL, g_hInst, NULL);
+        y += 24;
+        CreateWindow(WC_STATIC, " -+",
+                     WS_CHILD | WS_VISIBLE | SS_LEFT,
+                     18, y + 2, 22, h, hWnd, NULL, g_hInst, NULL);
+        d->hOffsetEdit = CreateWindow(WC_EDIT, "0",
+                           WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER,
+                           42, y, 55, h, hWnd,
+                           (HMENU)IDC_KBSIM_OFFSET, g_hInst, NULL);
+        CreateWindow(WC_STATIC, "ms",
+                     WS_CHILD | WS_VISIBLE | SS_LEFT,
+                     102, y + 2, 20, h, hWnd, NULL, g_hInst, NULL);
+
+        y += 28;
+        CreateWindow(WC_STATIC, "Mode:",
+                     WS_CHILD | WS_VISIBLE | SS_LEFT,
+                     10, y, 60, h, hWnd, NULL, g_hInst, NULL);
+        y += 24;
+        d->hContinuous = CreateWindow(WC_BUTTON, "Continuous",
+                           WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON |
+                           WS_GROUP,
+                           25, y, 130, h, hWnd,
+                           (HMENU)IDC_KBSIM_CONT, g_hInst, NULL);
+        y += 24;
+        d->hLimited = CreateWindow(WC_BUTTON, "Limited:",
+                       WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+                       25, y, 80, h, hWnd,
+                       (HMENU)IDC_KBSIM_LIMITED, g_hInst, NULL);
+        d->hLimitedCount = CreateWindow(WC_EDIT, "10",
+                              WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER,
+                              115, y, 55, h, hWnd,
+                              (HMENU)IDC_KBSIM_LIMIT, g_hInst, NULL);
+        CreateWindow(WC_STATIC, "repeats",
+                     WS_CHILD | WS_VISIBLE | SS_LEFT,
+                     175, y + 2, 60, h, hWnd, NULL, g_hInst, NULL);
+
+        y += 28;
+        CreateWindow(WC_STATIC, "Start Shortcut:",
+                     WS_CHILD | WS_VISIBLE | SS_LEFT,
+                     10, y, 100, h, hWnd, NULL, g_hInst, NULL);
+        y += 24;
+        d->hShortStart = CreateWindow(WC_STATIC, "Ctrl+Shift+J",
+                           WS_CHILD | WS_VISIBLE | SS_SUNKEN | SS_CENTER,
+                           120, y, 170, h, hWnd,
+                           (HMENU)IDC_KBSIM_SH_START, g_hInst, NULL);
+        d->hBtnSetStart = CreateWindow(WC_BUTTON, "Set",
+                            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                            300, y, 55, h, hWnd,
+                            (HMENU)IDC_KBSIM_SET_START, g_hInst, NULL);
+
+        y += 26;
+        CreateWindow(WC_STATIC, "Stop Shortcut:",
+                     WS_CHILD | WS_VISIBLE | SS_LEFT,
+                     10, y, 100, h, hWnd, NULL, g_hInst, NULL);
+        y += 24;
+        d->hShortStop = CreateWindow(WC_STATIC, "Ctrl+Shift+M",
+                          WS_CHILD | WS_VISIBLE | SS_SUNKEN | SS_CENTER,
+                          120, y, 170, h, hWnd,
+                          (HMENU)IDC_KBSIM_SH_STOP, g_hInst, NULL);
+        d->hBtnSetStop = CreateWindow(WC_BUTTON, "Set",
+                           WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                           300, y, 55, h, hWnd,
+                           (HMENU)IDC_KBSIM_SET_STOP, g_hInst, NULL);
+
+        y += 32;
+        d->hStatus = CreateWindow(WC_STATIC, "Status: Idle",
+                       WS_CHILD | WS_VISIBLE | SS_LEFT,
+                       10, y, 400, h, hWnd,
+                       (HMENU)IDC_KBSIM_STATUS, g_hInst, NULL);
+
+        y += 24;
+        d->hBtnStart = CreateWindow(WC_BUTTON, "Start",
+                        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                        120, y, 85, 26, hWnd,
+                        (HMENU)IDC_KBSIM_START, g_hInst, NULL);
+        d->hBtnStop = CreateWindow(WC_BUTTON, "Stop",
+                       WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                       230, y, 85, 26, hWnd,
+                       (HMENU)IDC_KBSIM_STOP, g_hInst, NULL);
+
+        SetWindowLongPtr(hWnd, GWLP_USERDATA, (LONG_PTR)d);
+
+        /* load saved sequence */
+        {
+            char buf[1024];
+            extern void db_get_setting_str(const char *k,
+                const char *d, char *o, int s);
+            db_get_setting_str("kbsim_sequence", "", buf, sizeof(buf));
+            if (buf[0]) SetWindowText(d->hSeqLbl, buf);
+        }
+        /* load saved interval */
+        {
+            int ims = db_get_setting_int("kbsim_interval_ms", 1000);
+            SetDlgItemInt(hWnd, IDC_KBSIM_INT_MIN, ims / 60000, FALSE);
+            SetDlgItemInt(hWnd, IDC_KBSIM_INT_SEC,
+                          (ims % 60000) / 1000, FALSE);
+            SetDlgItemInt(hWnd, IDC_KBSIM_INT_MS, ims % 1000, FALSE);
+        }
+        SetDlgItemInt(hWnd, IDC_KBSIM_OFFSET,
+            db_get_setting_int("kbsim_random_offset", 0), FALSE);
+        if (db_get_setting_int("kbsim_continuous", 1))
+            SendMessage(d->hContinuous, BM_SETCHECK, BST_CHECKED, 0);
+        else {
+            SendMessage(d->hLimited, BM_SETCHECK, BST_CHECKED, 0);
+            EnableWindow(d->hLimitedCount, TRUE);
+        }
+        SetDlgItemInt(hWnd, IDC_KBSIM_LIMIT,
+            db_get_setting_int("kbsim_limited_count", 10), FALSE);
+
+        {
+            int ss = db_get_setting_int("kbsim_start_shortcut",
+                       (MOD_CONTROL | MOD_SHIFT) << 16 | 'J');
+            int st = db_get_setting_int("kbsim_stop_shortcut",
+                       (MOD_CONTROL | MOD_SHIFT) << 16 | 'M');
+            char buf[64];
+            format_shortcut(ss, buf, sizeof(buf));
+            SetWindowText(d->hShortStart, buf);
+            format_shortcut(st, buf, sizeof(buf));
+            SetWindowText(d->hShortStop, buf);
+            register_kbsim_hotkey(d->hMainWnd, d->hotkeyStartId, ss);
+            register_kbsim_hotkey(d->hMainWnd, d->hotkeyStopId, st);
+        }
+
+        /* dark mode */
+        {
+            BOOL dark = db_get_setting_int("dark_mode", 0);
+            if (dark) {
+                BOOL useDark = TRUE;
+                DwmSetWindowAttribute(hWnd,
+                    DWMWA_USE_IMMERSIVE_DARK_MODE,
+                    &useDark, sizeof(useDark));
+                if (g_pAllowDarkModeForWindow)
+                    g_pAllowDarkModeForWindow(hWnd, TRUE);
+                SetWindowPos(hWnd, NULL, 0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
+                    SWP_NOACTIVATE | SWP_FRAMECHANGED);
+            }
+        }
+        return 0;
+    }
+
+    case WM_ERASEBKGND: {
+        BOOL dark = db_get_setting_int("dark_mode", 0);
+        if (dark && g_hDarkBrush) {
+            RECT rc;
+            GetClientRect(hWnd, &rc);
+            FillRect((HDC)wParam, &rc, g_hDarkBrush);
+            return TRUE;
+        }
+        return DefWindowProc(hWnd, msg, wParam, lParam);
+    }
+
+    case WM_CTLCOLORBTN:
+    case WM_CTLCOLORSTATIC: {
+        BOOL dark = db_get_setting_int("dark_mode", 0);
+        if (dark && g_hDarkBrush) {
+            HDC hdc = (HDC)wParam;
+            SetBkMode(hdc, TRANSPARENT);
+            SetTextColor(hdc, RGB(230, 230, 230));
+            return (LRESULT)g_hDarkBrush;
+        }
+        return DefWindowProc(hWnd, msg, wParam, lParam);
+    }
+
+    case WM_KEYDOWN:
+    case WM_SYSKEYDOWN: {
+        KbSimData *d = (KbSimData *)GetWindowLongPtr(
+            hWnd, GWLP_USERDATA);
+        if (d && d->capturing) {
+            int vk = (int)wParam;
+            if (vk == VK_CONTROL || vk == VK_SHIFT ||
+                vk == VK_MENU || vk == VK_LWIN || vk == VK_RWIN)
+                return 0;
+            int mod = 0;
+            if (GetAsyncKeyState(VK_CONTROL) & 0x8000) mod |= MOD_CONTROL;
+            if (GetAsyncKeyState(VK_SHIFT)   & 0x8000) mod |= MOD_SHIFT;
+            if (GetAsyncKeyState(VK_MENU)    & 0x8000) mod |= MOD_ALT;
+            if ((GetAsyncKeyState(VK_LWIN) | GetAsyncKeyState(VK_RWIN))
+                & 0x8000) mod |= MOD_WIN;
+            if (mod == 0) { d->capturing = 0; return 0; }
+
+            if (d->capturing == 1) {
+                /* Record mode: append to sequence */
+                int packed = (mod << 16) | vk;
+                char hex[16], curText[1024] = "";
+                sprintf(hex, "0x%08X", packed);
+                GetWindowText(d->hSeqLbl, curText, sizeof(curText));
+                if (curText[0]) strcat(curText, ",");
+                strcat(curText, hex);
+                SetWindowText(d->hSeqLbl, curText);
+                SetWindowText(d->hRecordBtn, "Record");
+                extern void db_set_setting_str(const char *k,
+                    const char *v);
+                db_set_setting_str("kbsim_sequence", curText);
+                d->capturing = 0;
+            } else if (d->capturing == 2) {
+                /* Set start shortcut */
+                int packed = (mod << 16) | vk;
+                char buf[64];
+                format_shortcut(packed, buf, sizeof(buf));
+                SetWindowText(d->hShortStart, buf);
+                db_set_setting_int("kbsim_start_shortcut", packed);
+                unregister_kbsim_hotkey(d->hMainWnd, d->hotkeyStartId);
+                register_kbsim_hotkey(d->hMainWnd, d->hotkeyStartId,
+                                      packed);
+            } else if (d->capturing == 3) {
+                /* Set stop shortcut */
+                int packed = (mod << 16) | vk;
+                char buf[64];
+                format_shortcut(packed, buf, sizeof(buf));
+                SetWindowText(d->hShortStop, buf);
+                db_set_setting_int("kbsim_stop_shortcut", packed);
+                unregister_kbsim_hotkey(d->hMainWnd, d->hotkeyStopId);
+                register_kbsim_hotkey(d->hMainWnd, d->hotkeyStopId,
+                                      packed);
+            }
+            d->capturing = 0;
+            return 0;
+        }
+        break;
+    }
+
+    case WM_KBSIM_CMD: {
+        KbSimData *d = (KbSimData *)GetWindowLongPtr(
+            hWnd, GWLP_USERDATA);
+        if (!d) return 0;
+        int cmd = (int)wParam;
+        if (cmd == 0 && !d->running) {
+            d->running = TRUE;
+            d->hThread = CreateThread(NULL, 0, KbSimThreadProc,
+                                       d, 0, NULL);
+            SetWindowText(d->hStatus, "Status: Running...");
+        } else if (cmd == 1 && d->running) {
+            d->running = FALSE;
+            if (d->hThread) {
+                WaitForSingleObject(d->hThread, 3000);
+                CloseHandle(d->hThread);
+                d->hThread = NULL;
+            }
+            char buf[64];
+            sprintf(buf, "Status: Stopped (%d cycles)",
+                    d->cyclesSoFar);
+            SetWindowText(d->hStatus, buf);
+        } else if (cmd == 2) {
+            if (d->hThread) {
+                WaitForSingleObject(d->hThread, 3000);
+                CloseHandle(d->hThread);
+                d->hThread = NULL;
+            }
+            char buf[64];
+            sprintf(buf, "Status: Done (%d cycles)",
+                    d->cyclesSoFar);
+            SetWindowText(d->hStatus, buf);
+        }
+        return 0;
+    }
+
+    case WM_COMMAND: {
+        KbSimData *d = (KbSimData *)GetWindowLongPtr(
+            hWnd, GWLP_USERDATA);
+        if (!d) break;
+        WORD id = LOWORD(wParam);
+        WORD code = HIWORD(wParam);
+
+        if (code == BN_CLICKED) {
+            if (id == IDC_KBSIM_RECORD) {
+                if (d->capturing == 1) {
+                    d->capturing = 0;
+                    SetWindowText(d->hRecordBtn, "Record");
+                    if (GetWindowTextLength(d->hSeqLbl) == 0)
+                        SetWindowText(d->hSeqLbl, "");
+                    return 0;
+                }
+                d->capturing = 1;
+                SetWindowText(d->hRecordBtn, "Stop");
+                if (GetWindowTextLength(d->hSeqLbl) == 0)
+                    SetWindowText(d->hSeqLbl, "Press key combo...");
+                SetFocus(hWnd);
+                return 0;
+            }
+            if (id == IDC_KBSIM_SET_START) {
+                d->capturing = 2;
+                SetWindowText(d->hShortStart, "Press keys...");
+                SetFocus(hWnd);
+                return 0;
+            }
+            if (id == IDC_KBSIM_SET_STOP) {
+                d->capturing = 3;
+                SetWindowText(d->hShortStop, "Press keys...");
+                SetFocus(hWnd);
+                return 0;
+            }
+            if (id == IDC_KBSIM_START) {
+                int intervalMs = GetDlgItemInt(hWnd,
+                    IDC_KBSIM_INT_MIN, NULL, FALSE) * 60000
+                    + GetDlgItemInt(hWnd,
+                    IDC_KBSIM_INT_SEC, NULL, FALSE) * 1000
+                    + GetDlgItemInt(hWnd,
+                    IDC_KBSIM_INT_MS, NULL, FALSE);
+                if (intervalMs < 10) intervalMs = 10;
+                BOOL continuous = (SendMessage(d->hContinuous,
+                                    BM_GETCHECK, 0, 0) == BST_CHECKED);
+
+                db_set_setting_int("kbsim_interval_ms", intervalMs);
+                db_set_setting_int("kbsim_random_offset",
+                    GetDlgItemInt(hWnd, IDC_KBSIM_OFFSET,
+                                  NULL, FALSE));
+                db_set_setting_int("kbsim_continuous",
+                                   continuous ? 1 : 0);
+                db_set_setting_int("kbsim_limited_count",
+                    GetDlgItemInt(hWnd, IDC_KBSIM_LIMIT,
+                                  NULL, FALSE));
+
+                PostMessage(hWnd, WM_KBSIM_CMD, 0, 0);
+                return 0;
+            }
+            if (id == IDC_KBSIM_STOP) {
+                PostMessage(hWnd, WM_KBSIM_CMD, 1, 0);
+                return 0;
+            }
+            if (id == IDC_KBSIM_CONT) {
+                EnableWindow(d->hLimitedCount, FALSE);
+                return 0;
+            }
+            if (id == IDC_KBSIM_LIMITED) {
+                EnableWindow(d->hLimitedCount, TRUE);
+                return 0;
+            }
+        }
+        break;
+    }
+
+    case WM_CLOSE:
+        DestroyWindow(hWnd);
+        return 0;
+
+    case WM_DESTROY: {
+        KbSimData *d = (KbSimData *)GetWindowLongPtr(
+            hWnd, GWLP_USERDATA);
+        if (d) {
+            d->running = FALSE;
+            if (d->hThread) {
+                WaitForSingleObject(d->hThread, 3000);
+                CloseHandle(d->hThread);
+            }
+            unregister_kbsim_hotkey(d->hMainWnd, d->hotkeyStartId);
+            unregister_kbsim_hotkey(d->hMainWnd, d->hotkeyStopId);
+            free(d);
+        }
+        return 0;
+    }
+    }
+    return DefWindowProc(hWnd, msg, wParam, lParam);
+}
+
+static void show_keyboard_sim(HWND hParent)
+{
+    static BOOL registered = FALSE;
+    if (!registered) {
+        WNDCLASS wc = {0};
+        wc.lpfnWndProc = KeyboardSimWndProc;
+        wc.hInstance = g_hInst;
+        wc.hIcon = g_hAppIcon;
+        wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+        wc.lpszClassName = "KSC_KeyboardSim";
+        RegisterClass(&wc);
+        registered = TRUE;
+    }
+    HWND hDlg = CreateWindow("KSC_KeyboardSim", "ksc - Keyboard Simulator",
+                 WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
+                 CW_USEDEFAULT, CW_USEDEFAULT, 460, 410,
+                 hParent, NULL, g_hInst, NULL);
+    ShowWindow(hDlg, SW_SHOW);
+    UpdateWindow(hDlg);
+}
+
 static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg,
                                     WPARAM wParam, LPARAM lParam)
 {
@@ -2633,6 +3276,7 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg,
         AppendMenu(hFileMenu, MF_STRING, IDM_VIEW_LOGS, "View Logs");
         AppendMenu(hFileMenu, MF_STRING, IDM_EXPORT_CSV, "Export Data...");
         AppendMenu(hFileMenu, MF_STRING, IDM_MOUSE_CLICKER, "Mouse Clicker");
+        AppendMenu(hFileMenu, MF_STRING, IDM_KEYBOARD_SIM, "Keyboard Sim");
         AppendMenu(hFileMenu, MF_SEPARATOR, 0, NULL);
         AppendMenu(hFileMenu, MF_STRING, IDM_BACKUP_DB, "Backup Database...");
         AppendMenu(hFileMenu, MF_STRING, IDM_CLOUD_BACKUP, "Cloud Backup");
@@ -2763,6 +3407,14 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg,
                 PostMessage(g_hClickerWnd, WM_CLICKER_CMD, 1, 0);
             }
         }
+        if (wParam == HOTKEY_ID_START_KBSIM ||
+            wParam == HOTKEY_ID_STOP_KBSIM) {
+            HWND hKbSim = FindWindow("KSC_KeyboardSim", NULL);
+            if (hKbSim) {
+                PostMessage(hKbSim, WM_KBSIM_CMD,
+                    wParam == HOTKEY_ID_START_KBSIM ? 0 : 1, 0);
+            }
+        }
         return 0;
 
     case WM_COMMAND:
@@ -2792,6 +3444,9 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg,
             break;
         case IDM_MOUSE_CLICKER:
             show_mouse_clicker(hWnd);
+            break;
+        case IDM_KEYBOARD_SIM:
+            show_keyboard_sim(hWnd);
             break;
         case IDM_KEYLOG_TOGGLE: {
             int curr = db_get_setting_int("keylogger_enabled", 0);
