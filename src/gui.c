@@ -2839,6 +2839,7 @@ static DWORD WINAPI KbSimThreadProc(LPVOID param)
         }
     }
 
+    PostMessage(GetParent(d->hBtnStart), WM_KBSIM_CMD, 2, 0);
     return 0;
 }
 
@@ -3151,6 +3152,24 @@ static LRESULT CALLBACK KeyboardSimWndProc(HWND hWnd, UINT msg,
         if (!d) return 0;
         int cmd = (int)wParam;
         if (cmd == 0 && !d->running) {
+            /* populate cached settings before spawning thread */
+            char seqCheck[2048];
+            GetWindowText(d->hSeqLbl, seqCheck, sizeof(seqCheck));
+            if (seqCheck[0] == '\0') return 0;
+            strcpy(d->cachedSeq, seqCheck);
+            d->intervalMs = GetDlgItemInt(hWnd, IDC_KBSIM_INT_MIN,
+                NULL, FALSE) * 60000
+                + GetDlgItemInt(hWnd, IDC_KBSIM_INT_SEC,
+                NULL, FALSE) * 1000
+                + GetDlgItemInt(hWnd, IDC_KBSIM_INT_MS,
+                NULL, FALSE);
+            d->offsetMs = GetDlgItemInt(hWnd, IDC_KBSIM_OFFSET,
+                                         NULL, FALSE);
+            d->isContinuous = (SendMessage(d->hContinuous,
+                BM_GETCHECK, 0, 0) == BST_CHECKED) ? 1 : 0;
+            d->limitCount = GetDlgItemInt(hWnd, IDC_KBSIM_LIMIT,
+                                           NULL, FALSE);
+
             d->running = TRUE;
             d->hThread = CreateThread(NULL, 0, KbSimThreadProc,
                                        d, 0, NULL);
@@ -3168,10 +3187,10 @@ static LRESULT CALLBACK KeyboardSimWndProc(HWND hWnd, UINT msg,
             SetWindowText(d->hStatus, buf);
         } else if (cmd == 2) {
             if (d->hThread) {
-                WaitForSingleObject(d->hThread, 3000);
                 CloseHandle(d->hThread);
                 d->hThread = NULL;
             }
+            d->running = FALSE;
             char buf[64];
             sprintf(buf, "Status: Done (%d cycles)",
                     d->cyclesSoFar);
@@ -3282,9 +3301,24 @@ static LRESULT CALLBACK KeyboardSimWndProc(HWND hWnd, UINT msg,
         break;
     }
 
-    case WM_CLOSE:
+    case WM_CLOSE: {
+        int ims = GetDlgItemInt(hWnd, IDC_KBSIM_INT_MIN,
+            NULL, FALSE) * 60000
+            + GetDlgItemInt(hWnd, IDC_KBSIM_INT_SEC,
+            NULL, FALSE) * 1000
+            + GetDlgItemInt(hWnd, IDC_KBSIM_INT_MS,
+            NULL, FALSE);
+        db_set_setting_int("kbsim_interval_ms", ims);
+        db_set_setting_int("kbsim_random_offset",
+            GetDlgItemInt(hWnd, IDC_KBSIM_OFFSET, NULL, FALSE));
+        db_set_setting_int("kbsim_continuous",
+            (SendMessage(GetDlgItem(hWnd, IDC_KBSIM_CONT),
+             BM_GETCHECK, 0, 0) == BST_CHECKED) ? 1 : 0);
+        db_set_setting_int("kbsim_limited_count",
+            GetDlgItemInt(hWnd, IDC_KBSIM_LIMIT, NULL, FALSE));
         ShowWindow(hWnd, SW_HIDE);
         return 0;
+    }
 
     case WM_DESTROY: {
         KbSimData *d = (KbSimData *)GetWindowLongPtr(
