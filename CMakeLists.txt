@@ -5,7 +5,7 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
 if(MINGW)
-    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static -static-libgcc")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static -static-libgcc -LC:/msys64/ucrt64/lib")
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O2 -s")
 endif()
 
@@ -40,6 +40,8 @@ target_compile_definitions(ksc PRIVATE _CRT_SECURE_NO_WARNINGS)
 target_link_libraries(ksc PRIVATE
     sqlite3
     "${CMAKE_SOURCE_DIR}/libssh2/libssh2.a"
+    ssl
+    crypto
     bcrypt
     crypt32
     ws2_32

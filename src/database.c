@@ -400,6 +400,54 @@ void db_set_setting_int(const char *key, int value)
     sqlite3_finalize(stmt);
 }
 
+void db_get_setting_str(const char *key, const char *default_val,
+                         char *out, int out_size)
+{
+    if (!g_db) {
+        if (default_val) strncpy(out, default_val, out_size - 1);
+        else out[0] = '\0';
+        out[out_size - 1] = '\0';
+        return;
+    }
+
+    const char *sql = "SELECT value FROM settings WHERE key = ?1;";
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        if (default_val) strncpy(out, default_val, out_size - 1);
+        else out[0] = '\0';
+        out[out_size - 1] = '\0';
+        return;
+    }
+
+    sqlite3_bind_text(stmt, 1, key, -1, SQLITE_STATIC);
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char *val = (const char *)sqlite3_column_text(stmt, 0);
+        if (val) strncpy(out, val, out_size - 1);
+        else if (default_val) strncpy(out, default_val, out_size - 1);
+        else out[0] = '\0';
+    } else {
+        if (default_val) strncpy(out, default_val, out_size - 1);
+        else out[0] = '\0';
+    }
+    out[out_size - 1] = '\0';
+    sqlite3_finalize(stmt);
+}
+
+void db_set_setting_str(const char *key, const char *value)
+{
+    if (!g_db) return;
+
+    const char *sql =
+        "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2);";
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL) != SQLITE_OK) return;
+
+    sqlite3_bind_text(stmt, 1, key, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, value, -1, SQLITE_STATIC);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+}
+
 void db_queue_event(int key_code, const char *key_name, const char *app)
 {
     EnterCriticalSection(&g_eventCs);

@@ -23,6 +23,9 @@ void db_free_apps(char **apps, int count);
 
 int  db_get_setting_int(const char *key, int default_val);
 void db_set_setting_int(const char *key, int value);
+void db_get_setting_str(const char *key, const char *default_val,
+                         char *out, int out_size);
+void db_set_setting_str(const char *key, const char *value);
 void db_queue_event(int key_code, const char *key_name, const char *app);
 void db_flush_events(void);
 void db_reset_stats(void);

@@ -91,7 +91,7 @@ if (-not (Test-Path "libssh2\libssh2.a")) {
     if (-not (Test-Path $LsshDir)) {
         New-Item -ItemType Directory -Path $LsshDir | Out-Null
     }
-    $LsshUrl = "https://www.libssh2.org/download/libssh2-1.11.0.tar.gz"
+    $LsshUrl = "https://github.com/libssh2/libssh2/archive/refs/heads/master.tar.gz"
     $LsshTgz = "$LsshDir\libssh2.tar.gz"
     try {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -127,11 +127,14 @@ if (-not (Test-Path "libssh2\libssh2.a")) {
     Push-Location $LsshBld
     try {
         & cmake $LsshSrc -G "MinGW Makefiles" `
-            -DCRYPTO_BACKEND=WinCNG `
+            -DCRYPTO_BACKEND=OpenSSL `
+            -DOPENSSL_ROOT_DIR=C:/msys64/ucrt64 `
             -DBUILD_SHARED_LIBS=OFF `
             -DBUILD_EXAMPLES=OFF `
             -DBUILD_TESTING=OFF `
             -DENABLE_ZLIB_COMPRESSION=OFF `
+            -DENABLE_CRYPT_NONE=OFF `
+            -DENABLE_MAC_NONE=OFF `
             -DCMAKE_POLICY_VERSION_MINIMUM="3.5" `
             -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_C_COMPILER=gcc

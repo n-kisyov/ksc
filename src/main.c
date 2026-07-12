@@ -3,6 +3,7 @@
 #include "database.h"
 #include "keylogdb.h"
 #include "cloudsync.h"
+#include "ssh_sync.h"
 #include "gui.h"
 #include "tray.h"
 
@@ -34,6 +35,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     }
 
     cloudsync_init();
+    ssh_sync_init();
 
     gui_init_dark_mode();
 

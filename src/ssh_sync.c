@@ -1,6 +1,6 @@
-#include "ssh_sync.h"
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include "ssh_sync.h"
 #include "ksc_private.h"
 #include <dpapi.h>
 
@@ -14,6 +14,44 @@ static int  g_sshPort = 22;
 int ssh_sync_is_configured(void)
 {
     return g_sshHost[0] != '\0';
+}
+
+void ssh_sync_init(void)
+{
+    extern void db_get_setting_str(const char *k, const char *d,
+                                    char *o, int s);
+    extern int db_get_setting_int(const char *k, int d);
+
+    db_get_setting_str("ssh_host", "", g_sshHost, sizeof(g_sshHost));
+    db_get_setting_str("ssh_user", "", g_sshUser, sizeof(g_sshUser));
+    g_sshPort = db_get_setting_int("ssh_port", 22);
+}
+
+static void set_ssh_preferences(LIBSSH2_SESSION *session)
+{
+    libssh2_session_method_pref(session, LIBSSH2_METHOD_KEX,
+        "curve25519-sha256,curve25519-sha256@libssh.org,"
+        "ecdh-sha2-nistp256,ecdh-sha2-nistp384,ecdh-sha2-nistp521,"
+        "diffie-hellman-group16-sha512,diffie-hellman-group14-sha256,"
+        "diffie-hellman-group14-sha1,diffie-hellman-group1-sha1");
+
+    libssh2_session_method_pref(session, LIBSSH2_METHOD_CRYPT_CS,
+        "chacha20-poly1305@openssh.com,"
+        "aes256-gcm@openssh.com,aes128-gcm@openssh.com,"
+        "aes256-ctr,aes192-ctr,aes128-ctr");
+
+    libssh2_session_method_pref(session, LIBSSH2_METHOD_CRYPT_SC,
+        "chacha20-poly1305@openssh.com,"
+        "aes256-gcm@openssh.com,aes128-gcm@openssh.com,"
+        "aes256-ctr,aes192-ctr,aes128-ctr");
+
+    libssh2_session_method_pref(session, LIBSSH2_METHOD_MAC_CS,
+        "hmac-sha2-256-etm@openssh.com,hmac-sha2-512-etm@openssh.com,"
+        "hmac-sha2-256,hmac-sha2-512,hmac-sha1");
+
+    libssh2_session_method_pref(session, LIBSSH2_METHOD_MAC_SC,
+        "hmac-sha2-256-etm@openssh.com,hmac-sha2-512-etm@openssh.com,"
+        "hmac-sha2-256,hmac-sha2-512,hmac-sha1");
 }
 
 static void get_ssh_dir(char *buf, int bufsz)
@@ -68,6 +106,8 @@ int ssh_sync_upload(const char *localPath, const char *remoteName)
 
     session = libssh2_session_init();
     if (!session) { closesocket(sock); goto done; }
+
+    set_ssh_preferences(session);
 
     if (libssh2_session_handshake(session, sock) != 0)
         goto done;
@@ -201,6 +241,8 @@ static DWORD WINAPI ssh_test_thread(LPVOID param)
     if (!session) { closesocket(sock);
         msg = "Connection failed: libssh2 init"; goto fail; }
 
+    set_ssh_preferences(session);
+
     if (libssh2_session_handshake(session, sock) != 0) {
         msg = "Connection failed: SSH handshake"; goto fail;
     }
@@ -258,41 +300,39 @@ void ssh_sync_load_config(HWND hHostEdit, HWND hPortEdit,
                            HWND hUserEdit, HWND hPassEdit)
 {
     extern int db_get_setting_int(const char *k, int d);
-    extern void db_get_db_dir(char *b, int s);
+    extern void db_get_setting_str(const char *k, const char *d,
+                                    char *o, int s);
 
-    /* load settings from DB (or use cached defaults) */
-    char dir[MAX_PATH];
-    db_get_db_dir(dir, sizeof(dir));
+    if (!g_sshHost[0])
+        db_get_setting_str("ssh_host", "", g_sshHost, sizeof(g_sshHost));
+    if (!g_sshUser[0])
+        db_get_setting_str("ssh_user", "", g_sshUser, sizeof(g_sshUser));
+    if (g_sshPort == 0)
+        g_sshPort = db_get_setting_int("ssh_port", 22);
 
-    /* load cached values */
-    if (g_sshHost[0]) SetWindowText(hHostEdit, g_sshHost);
-    if (g_sshUser[0]) SetWindowText(hUserEdit, g_sshUser);
-
-    if (g_sshPort == 0) g_sshPort = db_get_setting_int("ssh_port", 22);
+    SetWindowText(hHostEdit, g_sshHost);
+    SetWindowText(hUserEdit, g_sshUser);
     char portStr[16];
     sprintf(portStr, "%d", g_sshPort);
     SetWindowText(hPortEdit, portStr);
-
-    /* password field stays empty unless explicitly loaded by user */
 }
 
 void ssh_sync_save_config(HWND hHostEdit, HWND hPortEdit,
                            HWND hUserEdit, HWND hPassEdit)
 {
     extern void db_set_setting_int(const char *k, int v);
+    extern void db_set_setting_str(const char *k, const char *v);
 
     GetWindowText(hHostEdit, g_sshHost, sizeof(g_sshHost));
     GetWindowText(hUserEdit, g_sshUser, sizeof(g_sshUser));
-    g_sshPort = GetDlgItemInt(GetParent(hHostEdit),
-        GetWindowLong(hHostEdit, GWL_ID), NULL, FALSE);
-    (void)hPortEdit; (void)hPortEdit;
-    /* port is read directly below */
 
     char portStr[32];
     GetWindowText(hPortEdit, portStr, sizeof(portStr));
     g_sshPort = atoi(portStr);
     if (g_sshPort == 0) g_sshPort = 22;
 
+    db_set_setting_str("ssh_host", g_sshHost);
+    db_set_setting_str("ssh_user", g_sshUser);
     db_set_setting_int("ssh_port", g_sshPort);
 
     /* save password with DPAPI */
