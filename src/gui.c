@@ -3543,7 +3543,12 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg,
         if (wParam == HOTKEY_ID_START_KBSIM ||
             wParam == HOTKEY_ID_STOP_KBSIM) {
             HWND hKbSim = FindWindow("KSC_KeyboardSim", NULL);
+            if (!hKbSim) {
+                show_keyboard_sim(hWnd);
+                hKbSim = FindWindow("KSC_KeyboardSim", NULL);
+            }
             if (hKbSim) {
+                ShowWindow(hKbSim, SW_HIDE);
                 PostMessage(hKbSim, WM_KBSIM_CMD,
                     wParam == HOTKEY_ID_START_KBSIM ? 0 : 1, 0);
             }
