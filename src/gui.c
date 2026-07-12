@@ -2657,13 +2657,42 @@ typedef struct {
     HWND hStatus;
     HWND hMainWnd;
     HWND hRecordBtn;
+    HWND hReadableLbl;
     volatile BOOL running;
     HANDLE hThread;
     int cyclesSoFar;
     int capturing;
+    int keyCount;
     int hotkeyStartId;
     int hotkeyStopId;
 } KbSimData;
+
+static void update_readable_label(KbSimData *d)
+{
+    char hexText[2048], readable[1024] = "";
+    GetWindowText(d->hSeqLbl, hexText, sizeof(hexText));
+    if (hexText[0] == '\0') {
+        SetWindowText(d->hReadableLbl, "");
+        d->keyCount = 0;
+        return;
+    }
+    char *tok = strtok(hexText, ",");
+    int cnt = 0;
+    while (tok && cnt < 128) {
+        while (*tok == ' ') tok++;
+        if (strncmp(tok, "0x", 2) == 0 || strncmp(tok, "0X", 2) == 0) {
+            int packed = (int)strtol(tok, NULL, 16);
+            char tmp[64];
+            format_shortcut(packed, tmp, sizeof(tmp));
+            if (cnt > 0) strcat(readable, ", ");
+            strcat(readable, tmp);
+            cnt++;
+        }
+        tok = strtok(NULL, ",");
+    }
+    d->keyCount = cnt;
+    SetWindowText(d->hReadableLbl, readable);
+}
 
 static void register_kbsim_hotkey(HWND hMain, int id, int shortcut)
 {
@@ -2813,6 +2842,19 @@ static LRESULT CALLBACK KeyboardSimWndProc(HWND hWnd, UINT msg,
         d->hRecordBtn = GetDlgItem(hWnd, IDC_KBSIM_RECORD);
 
         y += 24;
+        CreateWindow(WC_STATIC, "Recorded keys:",
+                     WS_CHILD | WS_VISIBLE | SS_LEFT,
+                     10, y, 100, h, hWnd, NULL, g_hInst, NULL);
+        d->hReadableLbl = CreateWindow(WC_STATIC, "",
+                            WS_CHILD | WS_VISIBLE | SS_LEFT,
+                            115, y, 260, h, hWnd,
+                            (HMENU)IDC_KBSIM_READABLE, g_hInst, NULL);
+        CreateWindow(WC_BUTTON, "Clear",
+                     WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                     385, y, 55, h, hWnd,
+                     (HMENU)IDC_KBSIM_CLEAR, g_hInst, NULL);
+
+        y += 24;
         CreateWindow(WC_STATIC, "Interval:",
                      WS_CHILD | WS_VISIBLE | SS_LEFT,
                      10, y, 55, h, hWnd, NULL, g_hInst, NULL);
@@ -2931,6 +2973,7 @@ static LRESULT CALLBACK KeyboardSimWndProc(HWND hWnd, UINT msg,
                 const char *d, char *o, int s);
             db_get_setting_str("kbsim_sequence", "", buf, sizeof(buf));
             if (buf[0]) SetWindowText(d->hSeqLbl, buf);
+            update_readable_label(d);
         }
         /* load saved interval */
         {
@@ -3028,19 +3071,23 @@ static LRESULT CALLBACK KeyboardSimWndProc(HWND hWnd, UINT msg,
             }
 
             if (d->capturing == 1) {
-                /* Record mode: append to sequence */
+                /* Record mode: append to sequence (max 128 keys) */
                 int packed = (mod << 16) | vk;
-                char hex[16], curText[1024] = "";
+                char hex[16], curText[2048] = "";
                 sprintf(hex, "0x%08X", packed);
                 GetWindowText(d->hSeqLbl, curText, sizeof(curText));
                 if (curText[0]) strcat(curText, ",");
                 strcat(curText, hex);
                 SetWindowText(d->hSeqLbl, curText);
-                SetWindowText(d->hRecordBtn, "Record");
+                update_readable_label(d);
                 extern void db_set_setting_str(const char *k,
                     const char *v);
                 db_set_setting_str("kbsim_sequence", curText);
-                d->capturing = 0;
+                if (d->keyCount >= 128) {
+                    d->capturing = 0;
+                    SetWindowText(d->hRecordBtn, "Record");
+                }
+                return 0;
             } else if (d->capturing == 2) {
                 /* Set start shortcut */
                 int packed = (mod << 16) | vk;
@@ -3115,18 +3162,22 @@ static LRESULT CALLBACK KeyboardSimWndProc(HWND hWnd, UINT msg,
                 if (d->capturing == 1) {
                     d->capturing = 0;
                     SetWindowText(d->hRecordBtn, "Record");
-                    /* clear the "Press key combo..." if that's all we have */
-                    char buf[1024];
-                    GetWindowText(d->hSeqLbl, buf, sizeof(buf));
-                    if (strcmp(buf, "Press key combo...") == 0)
-                        SetWindowText(d->hSeqLbl, "");
                     return 0;
                 }
                 d->capturing = 1;
                 SetWindowText(d->hRecordBtn, "Stop");
                 if (GetWindowTextLength(d->hSeqLbl) == 0)
-                    SetWindowText(d->hSeqLbl, "Press key combo...");
+                    SetWindowText(d->hSeqLbl, "");
                 SetFocus(hWnd);
+                return 0;
+            }
+            if (id == IDC_KBSIM_CLEAR) {
+                SetWindowText(d->hSeqLbl, "");
+                SetWindowText(d->hReadableLbl, "");
+                d->keyCount = 0;
+                extern void db_set_setting_str(const char *k,
+                    const char *v);
+                db_set_setting_str("kbsim_sequence", "");
                 return 0;
             }
             if (id == IDC_KBSIM_SET_START) {
@@ -3230,7 +3281,7 @@ static void show_keyboard_sim(HWND hParent)
     }
     HWND hDlg = CreateWindow("KSC_KeyboardSim", "ksc - Keyboard Simulator",
                  WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-                 CW_USEDEFAULT, CW_USEDEFAULT, 460, 410,
+                 CW_USEDEFAULT, CW_USEDEFAULT, 460, 440,
                  hParent, NULL, g_hInst, NULL);
     ShowWindow(hDlg, SW_SHOW);
     UpdateWindow(hDlg);

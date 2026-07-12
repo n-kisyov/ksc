@@ -114,6 +114,8 @@
 #define IDC_KBSIM_STOP           2065
 #define IDC_KBSIM_STATUS         2066
 #define IDC_HEATMAP_APP_COMBO    2067
+#define IDC_KBSIM_READABLE       2068
+#define IDC_KBSIM_CLEAR          2069
 
 #define HOTKEY_ID_START_CLICK 100
 #define HOTKEY_ID_STOP_CLICK  101
