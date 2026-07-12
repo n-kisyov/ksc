@@ -308,6 +308,7 @@ static DWORD WINAPI cloudsync_backup_thread(LPVOID param)
         http_upload_file(url, g_accessToken, localBak, bakNames[i],
                          g_folderId, &r, &st2);
         free(r);
+        DeleteFile(localBak);
 
         int pct = (int)(((i + 1) * 100LL) / nFiles);
         if (hCloudWnd)
