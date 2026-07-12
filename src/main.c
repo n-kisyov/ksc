@@ -56,6 +56,23 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         }
     }
 
+    {
+        int scStart = db_get_setting_int("kbsim_start_shortcut",
+                       (MOD_CONTROL | MOD_SHIFT) << 16 | 'J');
+        int scStop  = db_get_setting_int("kbsim_stop_shortcut",
+                       (MOD_CONTROL | MOD_SHIFT) << 16 | 'M');
+        if (scStart > 0) {
+            RegisterHotKey(hWnd, HOTKEY_ID_START_KBSIM,
+                (scStart & 0xFFFF0000 ? (scStart >> 16) & 0xFFFF : 0) |
+                MOD_NOREPEAT, scStart & 0xFFFF);
+        }
+        if (scStop > 0) {
+            RegisterHotKey(hWnd, HOTKEY_ID_STOP_KBSIM,
+                (scStop & 0xFFFF0000 ? (scStop >> 16) & 0xFFFF : 0) |
+                MOD_NOREPEAT, scStop & 0xFFFF);
+        }
+    }
+
     if (!keyhook_start()) {
         MessageBox(NULL,
                    "Failed to start keyboard hook.\n\n"

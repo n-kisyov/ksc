@@ -3243,22 +3243,13 @@ static LRESULT CALLBACK KeyboardSimWndProc(HWND hWnd, UINT msg,
     }
 
     case WM_CLOSE:
-        DestroyWindow(hWnd);
+        ShowWindow(hWnd, SW_HIDE);
         return 0;
 
     case WM_DESTROY: {
         KbSimData *d = (KbSimData *)GetWindowLongPtr(
             hWnd, GWLP_USERDATA);
-        if (d) {
-            d->running = FALSE;
-            if (d->hThread) {
-                WaitForSingleObject(d->hThread, 3000);
-                CloseHandle(d->hThread);
-            }
-            unregister_kbsim_hotkey(d->hMainWnd, d->hotkeyStartId);
-            unregister_kbsim_hotkey(d->hMainWnd, d->hotkeyStopId);
-            free(d);
-        }
+        if (d) free(d);
         return 0;
     }
     }
@@ -3620,6 +3611,10 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg,
         return 0;
 
     case WM_DESTROY:
+        {
+            HWND hKb = FindWindow("KSC_KeyboardSim", NULL);
+            if (hKb) DestroyWindow(hKb);
+        }
         if (g_hDarkBrush) { DeleteObject(g_hDarkBrush); g_hDarkBrush = NULL; }
         if (g_hLvBrush)   { DeleteObject(g_hLvBrush);   g_hLvBrush = NULL;   }
         KillTimer(hWnd, ID_TIMER_REFRESH);
