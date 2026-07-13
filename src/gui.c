@@ -7,6 +7,7 @@
 #include "tray.h"
 #include "cloudsync.h"
 #include "ssh_sync.h"
+#include "telegram.h"
 #include "resource.h"
 
 static HINSTANCE g_hInst = NULL;
@@ -336,8 +337,8 @@ static LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg,
                      WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
                      10, y, 85, 22, hWnd, NULL, g_hInst, NULL);
         CreateWindow(WC_EDIT, "",
-                     WS_CHILD | WS_VISIBLE | WS_BORDER,
-                     97, y, 200, 22, hWnd,
+                     WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
+                     97, y, 260, 22, hWnd,
                      (HMENU)IDC_TELEGRAM_TOKEN, g_hInst, NULL);
         {
             char tok[256];
@@ -352,8 +353,8 @@ static LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg,
                      WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
                      10, y, 85, 22, hWnd, NULL, g_hInst, NULL);
         CreateWindow(WC_EDIT, "",
-                     WS_CHILD | WS_VISIBLE | WS_BORDER,
-                     97, y, 200, 22, hWnd,
+                     WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
+                     97, y, 260, 22, hWnd,
                      (HMENU)IDC_TELEGRAM_CHAT_ID, g_hInst, NULL);
         {
             char cid[256];
@@ -362,6 +363,12 @@ static LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg,
             db_get_setting_str("tg_chat_id", "", cid, sizeof(cid));
             SetDlgItemText(hWnd, IDC_TELEGRAM_CHAT_ID, cid);
         }
+
+        y += 28;
+        CreateWindow(WC_BUTTON, "Save Credentials",
+                     WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                     20, y, 130, 22, hWnd,
+                     (HMENU)IDC_TELEGRAM_SAVE, g_hInst, NULL);
 
         y += 26;
         CreateWindow("BUTTON", "Enable Telegram",
@@ -525,6 +532,19 @@ static LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg,
         if ((LOWORD(wParam) == IDC_TELEGRAM_TOKEN ||
              LOWORD(wParam) == IDC_TELEGRAM_CHAT_ID) &&
             HIWORD(wParam) == EN_CHANGE) {
+            char buf[256];
+            extern void db_set_setting_str(const char *k,
+                const char *v);
+            if (LOWORD(wParam) == IDC_TELEGRAM_TOKEN) {
+                GetDlgItemText(hWnd, IDC_TELEGRAM_TOKEN,
+                               buf, sizeof(buf));
+                db_set_setting_str("tg_bot_token", buf);
+            } else {
+                GetDlgItemText(hWnd, IDC_TELEGRAM_CHAT_ID,
+                               buf, sizeof(buf));
+                db_set_setting_str("tg_chat_id", buf);
+            }
+            /* update enable/disable */
             char tok[256], cid[256];
             GetDlgItemText(hWnd, IDC_TELEGRAM_TOKEN,
                            tok, sizeof(tok));
@@ -537,16 +557,42 @@ static LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg,
                 EnableWindow(hChk, FALSE);
                 SendMessage(hChk, BM_SETCHECK, BST_UNCHECKED, 0);
             }
-            /* auto-save as user types */
-            extern void db_set_setting_str(const char *k,
-                const char *v);
-            db_set_setting_str("tg_bot_token", tok);
-            db_set_setting_str("tg_chat_id", cid);
             return 0;
         }
         if (LOWORD(wParam) == IDC_TELEGRAM_TEST &&
             HIWORD(wParam) == BN_CLICKED) {
             telegram_test(hWnd);
+            return 0;
+        }
+        if (LOWORD(wParam) == IDC_TELEGRAM_SAVE &&
+            HIWORD(wParam) == BN_CLICKED) {
+            char tok[256], cid[256];
+            GetDlgItemText(hWnd, IDC_TELEGRAM_TOKEN, tok, sizeof(tok));
+            GetDlgItemText(hWnd, IDC_TELEGRAM_CHAT_ID, cid, sizeof(cid));
+            extern void db_set_setting_str(const char *k,
+                const char *v);
+            db_set_setting_str("tg_bot_token", tok);
+            db_set_setting_str("tg_chat_id", cid);
+            /* update enable/disable state */
+            HWND hChk = GetDlgItem(hWnd, IDC_TELEGRAM_ENABLE);
+            if (tok[0] && cid[0])
+                EnableWindow(hChk, TRUE);
+            else {
+                EnableWindow(hChk, FALSE);
+                SendMessage(hChk, BM_SETCHECK, BST_UNCHECKED, 0);
+            }
+            MessageBox(hWnd, "Telegram credentials saved.",
+                       "Telegram", MB_OK | MB_ICONINFORMATION);
+            {
+                char dbg[512], verify[256] = "";
+                extern void db_get_setting_str(const char *k,
+                    const char *d, char *o, int s);
+                db_get_setting_str("tg_chat_id", "", verify,
+                                    sizeof(verify));
+                sprintf(dbg, "Telegram credentials saved.\n"
+                    "Chat ID in DB: [%s]", verify);
+                MessageBox(hWnd, dbg, "Debug", MB_OK);
+            }
             return 0;
         }
         if (LOWORD(wParam) == IDOK) {
@@ -622,7 +668,7 @@ static void show_settings(HWND hParent)
 
     HWND hDlg = CreateWindow("KSC_Settings", "KSC Settings",
                  WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
-                 CW_USEDEFAULT, CW_USEDEFAULT, 320, 550,
+                 CW_USEDEFAULT, CW_USEDEFAULT, 380, 580,
                  hParent, NULL, g_hInst, hParent);
     ShowWindow(hDlg, SW_SHOW);
     UpdateWindow(hDlg);

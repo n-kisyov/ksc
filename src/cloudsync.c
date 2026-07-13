@@ -261,6 +261,7 @@ static DWORD WINAPI cloudsync_backup_thread(LPVOID param)
             st.wHour, st.wMinute, st.wSecond);
 
     int totalSize = 0;
+    int fileSizes[4] = {0};
     char bakNames[4][128];
     int nFiles = 0;
 
@@ -274,7 +275,9 @@ static DWORD WINAPI cloudsync_backup_thread(LPVOID param)
             FILE_SHARE_READ, NULL, OPEN_EXISTING,
             FILE_ATTRIBUTE_NORMAL, NULL);
         if (hf != INVALID_HANDLE_VALUE) {
-            totalSize += (int)GetFileSize(hf, NULL);
+            int sz = (int)GetFileSize(hf, NULL);
+            totalSize += sz;
+            fileSizes[nFiles] = sz;
             CloseHandle(hf);
         }
         nFiles++;
@@ -289,7 +292,9 @@ static DWORD WINAPI cloudsync_backup_thread(LPVOID param)
             FILE_SHARE_READ, NULL, OPEN_EXISTING,
             FILE_ATTRIBUTE_NORMAL, NULL);
         if (hf != INVALID_HANDLE_VALUE) {
-            totalSize += (int)GetFileSize(hf, NULL);
+            int sz = (int)GetFileSize(hf, NULL);
+            totalSize += sz;
+            fileSizes[nFiles] = sz;
             CloseHandle(hf);
         }
         nFiles++;
@@ -422,10 +427,17 @@ static DWORD WINAPI cloudsync_backup_thread(LPVOID param)
             int mode = db_get_setting_int("tg_notify_mode", 0);
             if (mode == 0 || (mode == 1 && !allOK)) {
                 char msg[512];
-                sprintf(msg, "%s ksc sync %s: %s\n%s (%d KB)",
+                char filesDetail[512] = "";
+                for (int i = 0; i < nFiles; i++) {
+                    if (i > 0) strcat(filesDetail, "\n");
+                    sprintf(filesDetail + strlen(filesDetail),
+                        "%s (%.2f MB)",
+                        bakNames[i], fileSizes[i] / (1024.0 * 1024.0));
+                }
+                sprintf(msg, "%s ksc sync %s: %s\n%s",
                     allOK ? "\xE2\x9C\x85" : "\xE2\x9D\x8C",
                     allOK ? "OK" : "FAILED",
-                    statusStr, filesStr, totalSize / 1024);
+                    statusStr, filesDetail);
                 telegram_send(msg);
             }
         }
