@@ -1765,7 +1765,12 @@ static DWORD WINAPI ClickerThreadProc(LPVOID param)
             delay += r;
         }
         if (delay < 10) delay = 10;
-        Sleep(delay);
+        /* sleep in chunks for responsive stop */
+        while (delay > 0 && d->running) {
+            int chunk = delay > 50 ? 50 : delay;
+            Sleep(chunk);
+            delay -= chunk;
+        }
     }
 
     return 0;
@@ -2142,9 +2147,27 @@ static LRESULT CALLBACK MouseClickerWndProc(HWND hWnd, UINT msg,
         break;
     }
 
-    case WM_CLOSE:
-        DestroyWindow(hWnd);
+    case WM_CLOSE: {
+        int intervalMs = GetDlgItemInt(hWnd,
+            IDC_CLICK_INTERVAL_MIN, NULL, FALSE) * 60000
+            + GetDlgItemInt(hWnd,
+            IDC_CLICK_INTERVAL_SEC, NULL, FALSE) * 1000
+            + GetDlgItemInt(hWnd,
+            IDC_CLICK_INTERVAL_MS, NULL, FALSE);
+        db_set_setting_int("clicker_interval_ms", intervalMs);
+        db_set_setting_int("clicker_random_offset",
+            GetDlgItemInt(hWnd, IDC_CLICK_RANDOM_OFFSET, NULL, FALSE));
+        db_set_setting_int("clicker_left_button",
+            (SendMessage(GetDlgItem(hWnd, IDC_CLICK_BTN_LEFT),
+             BM_GETCHECK, 0, 0) == BST_CHECKED) ? 1 : 0);
+        db_set_setting_int("clicker_continuous",
+            (SendMessage(GetDlgItem(hWnd, IDC_CLICK_MODE_CONT),
+             BM_GETCHECK, 0, 0) == BST_CHECKED) ? 1 : 0);
+        db_set_setting_int("clicker_limited_count",
+            GetDlgItemInt(hWnd, IDC_CLICK_LIMITED_COUNT, NULL, FALSE));
+        ShowWindow(hWnd, SW_HIDE);
         return 0;
+    }
 
     case WM_DESTROY: {
         ClickerData *d = (ClickerData *)GetWindowLongPtr(
