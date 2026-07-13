@@ -73,6 +73,23 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         }
     }
 
+    {
+        int cs = db_get_setting_int("clicker_start_shortcut",
+                   (MOD_CONTROL | MOD_SHIFT) << 16 | 'S');
+        int ce = db_get_setting_int("clicker_stop_shortcut",
+                   (MOD_CONTROL | MOD_SHIFT) << 16 | 'X');
+        if (cs > 0) {
+            RegisterHotKey(hWnd, HOTKEY_ID_START_CLICK,
+                (cs & 0xFFFF0000 ? (cs >> 16) & 0xFFFF : 0) |
+                MOD_NOREPEAT, cs & 0xFFFF);
+        }
+        if (ce > 0) {
+            RegisterHotKey(hWnd, HOTKEY_ID_STOP_CLICK,
+                (ce & 0xFFFF0000 ? (ce >> 16) & 0xFFFF : 0) |
+                MOD_NOREPEAT, ce & 0xFFFF);
+        }
+    }
+
     if (!keyhook_start()) {
         MessageBox(NULL,
                    "Failed to start keyboard hook.\n\n"

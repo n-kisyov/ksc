@@ -1972,13 +1972,6 @@ static LRESULT CALLBACK MouseClickerWndProc(HWND hWnd, UINT msg,
             SetWindowText(d->hShortStop, buf);
         }
 
-        if (!register_clicker_hotkey(d->hMainWnd, d->hotkeyStartId, startSc))
-            SetWindowText(d->hStatus,
-                "WARNING: Start hotkey in use by another app");
-        if (!register_clicker_hotkey(d->hMainWnd, d->hotkeyStopId, stopSc))
-            SetWindowText(d->hStatus,
-                "WARNING: Stop hotkey in use by another app");
-
         apply_clicker_dark(hWnd);
         return 0;
     }
@@ -2162,8 +2155,6 @@ static LRESULT CALLBACK MouseClickerWndProc(HWND hWnd, UINT msg,
                 WaitForSingleObject(d->hThread, 3000);
                 CloseHandle(d->hThread);
             }
-            unregister_clicker_hotkey(d->hMainWnd, d->hotkeyStartId);
-            unregister_clicker_hotkey(d->hMainWnd, d->hotkeyStopId);
             free(d);
         }
         g_hClickerWnd = NULL;
@@ -3538,6 +3529,14 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg,
                 PostMessage(g_hClickerWnd, WM_CLICKER_CMD, 0, 0);
             } else if (wParam == HOTKEY_ID_STOP_CLICK) {
                 PostMessage(g_hClickerWnd, WM_CLICKER_CMD, 1, 0);
+            }
+        } else if (wParam == HOTKEY_ID_START_CLICK ||
+                   wParam == HOTKEY_ID_STOP_CLICK) {
+            show_mouse_clicker(hWnd);
+            if (g_hClickerWnd) {
+                ShowWindow(g_hClickerWnd, SW_HIDE);
+                PostMessage(g_hClickerWnd, WM_CLICKER_CMD,
+                    wParam == HOTKEY_ID_START_CLICK ? 0 : 1, 0);
             }
         }
         if (wParam == HOTKEY_ID_START_KBSIM ||
