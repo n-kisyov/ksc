@@ -302,6 +302,8 @@ static LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg,
                      WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                      20, y, 160, 22, hWnd,
                      (HMENU)IDC_DELETE_KEYLOG_BTN, g_hInst, NULL);
+        if (db_get_setting_int("keylogger_enabled", 0))
+            EnableWindow(GetDlgItem(hWnd, IDC_DELETE_KEYLOG_BTN), FALSE);
 
         y += 30;
         CreateWindow("BUTTON", "Reset All Statistics",
@@ -499,6 +501,13 @@ static LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg,
         break;
 
     case WM_COMMAND:
+        if (LOWORD(wParam) == IDC_KEYLOGGER_CHK &&
+            HIWORD(wParam) == BN_CLICKED) {
+            int checked = (SendDlgItemMessage(hWnd, IDC_KEYLOGGER_CHK,
+                            BM_GETCHECK, 0, 0) == BST_CHECKED);
+            EnableWindow(GetDlgItem(hWnd, IDC_DELETE_KEYLOG_BTN),
+                         checked ? FALSE : TRUE);
+        }
         if (LOWORD(wParam) == IDC_DELETE_KEYLOG_BTN &&
             HIWORD(wParam) == BN_CLICKED) {
             keylog_delete_db();
