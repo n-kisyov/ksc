@@ -327,6 +327,85 @@ static LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg,
                      168, y, 50, 22, hWnd,
                      (HMENU)IDC_HOTKEY_SET_SHOW, g_hInst, NULL);
 
+        y += 30;
+        CreateWindow(WC_STATIC, "\x1a\x1a\x1a Telegram Notifications \x1a\x1a\x1a",
+                     WS_CHILD | WS_VISIBLE | SS_CENTER,
+                     10, y, 260, 22, hWnd, NULL, g_hInst, NULL);
+        y += 26;
+        CreateWindow(WC_STATIC, "Bot Token:",
+                     WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
+                     10, y, 85, 22, hWnd, NULL, g_hInst, NULL);
+        CreateWindow(WC_EDIT, "",
+                     WS_CHILD | WS_VISIBLE | WS_BORDER,
+                     97, y, 165, 22, hWnd,
+                     (HMENU)IDC_TELEGRAM_TOKEN, g_hInst, NULL);
+        {
+            char tok[256];
+            extern void db_get_setting_str(const char *k,
+                const char *d, char *o, int s);
+            db_get_setting_str("tg_bot_token", "", tok, sizeof(tok));
+            SetDlgItemText(hWnd, IDC_TELEGRAM_TOKEN, tok);
+        }
+
+        y += 26;
+        CreateWindow(WC_STATIC, "Group Chat ID:",
+                     WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
+                     10, y, 85, 22, hWnd, NULL, g_hInst, NULL);
+        CreateWindow(WC_EDIT, "",
+                     WS_CHILD | WS_VISIBLE | WS_BORDER,
+                     97, y, 165, 22, hWnd,
+                     (HMENU)IDC_TELEGRAM_CHAT_ID, g_hInst, NULL);
+        {
+            char cid[256];
+            extern void db_get_setting_str(const char *k,
+                const char *d, char *o, int s);
+            db_get_setting_str("tg_chat_id", "", cid, sizeof(cid));
+            SetDlgItemText(hWnd, IDC_TELEGRAM_CHAT_ID, cid);
+        }
+
+        y += 26;
+        CreateWindow("BUTTON", "Enable Telegram",
+                     WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                     20, y, 220, 22, hWnd,
+                     (HMENU)IDC_TELEGRAM_ENABLE, g_hInst, NULL);
+        {
+            int en = db_get_setting_int("tg_enabled", 0);
+            if (en)
+                SendDlgItemMessage(hWnd, IDC_TELEGRAM_ENABLE,
+                                   BM_SETCHECK, BST_CHECKED, 0);
+            /* disable if no token or chat_id */
+            char t1[256], t2[256];
+            extern void db_get_setting_str(const char *k,
+                const char *d, char *o, int s);
+            db_get_setting_str("tg_bot_token", "", t1, sizeof(t1));
+            db_get_setting_str("tg_chat_id", "", t2, sizeof(t2));
+            if (!t1[0] || !t2[0])
+                EnableWindow(GetDlgItem(hWnd, IDC_TELEGRAM_ENABLE), FALSE);
+        }
+
+        y += 26;
+        CreateWindow(WC_STATIC, "Notify:",
+                     WS_CHILD | WS_VISIBLE | SS_LEFT,
+                     20, y, 50, 22, hWnd, NULL, g_hInst, NULL);
+        CreateWindow("BUTTON", "Success + failures",
+                     WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON |
+                     WS_GROUP,
+                     75, y, 130, 22, hWnd,
+                     (HMENU)IDC_TELEGRAM_SUCCESS, g_hInst, NULL);
+        CreateWindow("BUTTON", "Failures only",
+                     WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+                     210, y, 90, 22, hWnd,
+                     (HMENU)IDC_TELEGRAM_FAILURES, g_hInst, NULL);
+        {
+            int mode = db_get_setting_int("tg_notify_mode", 0);
+            if (mode == 0)
+                SendDlgItemMessage(hWnd, IDC_TELEGRAM_SUCCESS,
+                                   BM_SETCHECK, BST_CHECKED, 0);
+            else
+                SendDlgItemMessage(hWnd, IDC_TELEGRAM_FAILURES,
+                                   BM_SETCHECK, BST_CHECKED, 0);
+        }
+
         y += 40;
         CreateWindow("BUTTON", "OK",
                      WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
@@ -433,6 +512,23 @@ static LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg,
             SetFocus(hWnd);
             return 0;
         }
+        if ((LOWORD(wParam) == IDC_TELEGRAM_TOKEN ||
+             LOWORD(wParam) == IDC_TELEGRAM_CHAT_ID) &&
+            HIWORD(wParam) == EN_CHANGE) {
+            char tok[256], cid[256];
+            GetDlgItemText(hWnd, IDC_TELEGRAM_TOKEN,
+                           tok, sizeof(tok));
+            GetDlgItemText(hWnd, IDC_TELEGRAM_CHAT_ID,
+                           cid, sizeof(cid));
+            HWND hChk = GetDlgItem(hWnd, IDC_TELEGRAM_ENABLE);
+            if (tok[0] && cid[0])
+                EnableWindow(hChk, TRUE);
+            else {
+                EnableWindow(hChk, FALSE);
+                SendMessage(hChk, BM_SETCHECK, BST_UNCHECKED, 0);
+            }
+            return 0;
+        }
         if (LOWORD(wParam) == IDOK) {
             int startup = (SendDlgItemMessage(hWnd, IDC_STARTUP_CHK,
                             BM_GETCHECK, 0, 0) == BST_CHECKED);
@@ -452,6 +548,25 @@ static LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg,
             db_set_setting_int("keylogger_enabled", keylogger);
             keyhook_set_keylogger_enabled(keylogger);
             if (keylogger) keylog_open();
+
+            /* save Telegram settings */
+            {
+                char tok[256], cid[256];
+                GetDlgItemText(hWnd, IDC_TELEGRAM_TOKEN,
+                               tok, sizeof(tok));
+                GetDlgItemText(hWnd, IDC_TELEGRAM_CHAT_ID,
+                               cid, sizeof(cid));
+                extern void db_set_setting_str(const char *k,
+                    const char *v);
+                db_set_setting_str("tg_bot_token", tok);
+                db_set_setting_str("tg_chat_id", cid);
+            }
+            db_set_setting_int("tg_enabled",
+                (SendDlgItemMessage(hWnd, IDC_TELEGRAM_ENABLE,
+                 BM_GETCHECK, 0, 0) == BST_CHECKED) ? 1 : 0);
+            db_set_setting_int("tg_notify_mode",
+                (SendDlgItemMessage(hWnd, IDC_TELEGRAM_SUCCESS,
+                 BM_GETCHECK, 0, 0) == BST_CHECKED) ? 0 : 1);
 
             HWND hMain = (HWND)GetWindowLongPtr(hWnd, GWLP_USERDATA);
             if (hMain) PostMessage(hMain, WM_THEME_CHANGED, 0, 0);
@@ -487,7 +602,7 @@ static void show_settings(HWND hParent)
 
     HWND hDlg = CreateWindow("KSC_Settings", "KSC Settings",
                  WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
-                 CW_USEDEFAULT, CW_USEDEFAULT, 280, 340,
+                 CW_USEDEFAULT, CW_USEDEFAULT, 320, 480,
                  hParent, NULL, g_hInst, hParent);
     ShowWindow(hDlg, SW_SHOW);
     UpdateWindow(hDlg);

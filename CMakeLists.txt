@@ -25,6 +25,7 @@ set(SOURCES
     src/http_win.c
     src/json_micro.c
     src/ssh_sync.c
+    src/telegram.c
     src/gui.c
     src/tray.c
     src/startup.c

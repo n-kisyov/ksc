@@ -2,6 +2,7 @@
 #include <ws2tcpip.h>
 #include "cloudsync.h"
 #include "ssh_sync.h"
+#include "telegram.h"
 #include "ksc_private.h"
 #include <dpapi.h>
 #include <winhttp.h>
@@ -357,12 +358,13 @@ static DWORD WINAPI cloudsync_backup_thread(LPVOID param)
     if (statusStr[0] == '\0')
         strcpy(statusStr, "none");
 
+    char filesStr[512] = "";
+
     /* save sync history */
     {
         char histPath[MAX_PATH];
         sprintf(histPath, "%s\\cloud_sync_history.json", dir);
 
-        char filesStr[512] = "";
         for (int i = 0; i < nFiles; i++) {
             if (i > 0) strcat(filesStr, ", ");
             strcat(filesStr, bakNames[i]);
@@ -410,6 +412,23 @@ static DWORD WINAPI cloudsync_backup_thread(LPVOID param)
             CloseHandle(hf);
         }
         free(existing);
+    }
+
+    /* send Telegram notification if enabled */
+    {
+        extern int db_get_setting_int(const char *k, int d);
+        if (db_get_setting_int("tg_enabled", 0)) {
+            int allOK = (driveOK && sshOK);
+            int mode = db_get_setting_int("tg_notify_mode", 0);
+            if (mode == 0 || (mode == 1 && !allOK)) {
+                char msg[512];
+                sprintf(msg, "%s ksc sync %s: %s\n%s (%d KB)",
+                    allOK ? "\xE2\x9C\x85" : "\xE2\x9D\x8C",
+                    allOK ? "OK" : "FAILED",
+                    statusStr, filesStr, totalSize / 1024);
+                telegram_send(msg);
+            }
+        }
     }
 
     if (hCloudWnd)
