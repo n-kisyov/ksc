@@ -330,14 +330,14 @@ static LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg,
         y += 30;
         CreateWindow(WC_STATIC, "\x1a\x1a\x1a Telegram Notifications \x1a\x1a\x1a",
                      WS_CHILD | WS_VISIBLE | SS_CENTER,
-                     10, y, 260, 22, hWnd, NULL, g_hInst, NULL);
+                     10, y, 300, 22, hWnd, NULL, g_hInst, NULL);
         y += 26;
         CreateWindow(WC_STATIC, "Bot Token:",
                      WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
                      10, y, 85, 22, hWnd, NULL, g_hInst, NULL);
         CreateWindow(WC_EDIT, "",
                      WS_CHILD | WS_VISIBLE | WS_BORDER,
-                     97, y, 165, 22, hWnd,
+                     97, y, 200, 22, hWnd,
                      (HMENU)IDC_TELEGRAM_TOKEN, g_hInst, NULL);
         {
             char tok[256];
@@ -353,7 +353,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg,
                      10, y, 85, 22, hWnd, NULL, g_hInst, NULL);
         CreateWindow(WC_EDIT, "",
                      WS_CHILD | WS_VISIBLE | WS_BORDER,
-                     97, y, 165, 22, hWnd,
+                     97, y, 200, 22, hWnd,
                      (HMENU)IDC_TELEGRAM_CHAT_ID, g_hInst, NULL);
         {
             char cid[256];
