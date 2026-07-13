@@ -2612,6 +2612,8 @@ static void show_cloud_backup(HWND hParent)
 static void show_mouse_clicker(HWND hParent)
 {
     if (g_hClickerWnd && IsWindow(g_hClickerWnd)) {
+        if (!IsWindowVisible(g_hClickerWnd))
+            ShowWindow(g_hClickerWnd, SW_RESTORE);
         SetForegroundWindow(g_hClickerWnd);
         return;
     }
@@ -3323,6 +3325,13 @@ static LRESULT CALLBACK KeyboardSimWndProc(HWND hWnd, UINT msg,
 
 static void show_keyboard_sim(HWND hParent)
 {
+    HWND existing = FindWindow("KSC_KeyboardSim", NULL);
+    if (existing) {
+        if (!IsWindowVisible(existing))
+            ShowWindow(existing, SW_RESTORE);
+        SetForegroundWindow(existing);
+        return;
+    }
     static BOOL registered = FALSE;
     if (!registered) {
         WNDCLASS wc = {0};
