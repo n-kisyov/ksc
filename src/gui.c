@@ -505,8 +505,12 @@ static LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg,
             HIWORD(wParam) == BN_CLICKED) {
             int checked = (SendDlgItemMessage(hWnd, IDC_KEYLOGGER_CHK,
                             BM_GETCHECK, 0, 0) == BST_CHECKED);
+            db_set_setting_int("keylogger_enabled", checked);
+            keyhook_set_keylogger_enabled(checked);
+            if (checked) keylog_open();
             EnableWindow(GetDlgItem(hWnd, IDC_DELETE_KEYLOG_BTN),
                          checked ? FALSE : TRUE);
+            return 0;
         }
         if (LOWORD(wParam) == IDC_DELETE_KEYLOG_BTN &&
             HIWORD(wParam) == BN_CLICKED) {
