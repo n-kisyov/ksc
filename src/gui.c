@@ -366,8 +366,11 @@ static LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg,
         y += 26;
         CreateWindow("BUTTON", "Enable Telegram",
                      WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                     20, y, 220, 22, hWnd,
+                     20, y, 140, 22, hWnd,
                      (HMENU)IDC_TELEGRAM_ENABLE, g_hInst, NULL);
+        CreateWindow(WC_STATIC, "(cloud sync status)",
+                     WS_CHILD | WS_VISIBLE | SS_LEFT,
+                     165, y + 3, 130, 18, hWnd, NULL, g_hInst, NULL);
         {
             int en = db_get_setting_int("tg_enabled", 0);
             if (en)
@@ -390,11 +393,12 @@ static LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg,
         CreateWindow("BUTTON", "Success + failures",
                      WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON |
                      WS_GROUP,
-                     75, y, 130, 22, hWnd,
+                     75, y, 150, 22, hWnd,
                      (HMENU)IDC_TELEGRAM_SUCCESS, g_hInst, NULL);
+        y += 22;
         CreateWindow("BUTTON", "Failures only",
                      WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
-                     210, y, 90, 22, hWnd,
+                     75, y, 150, 22, hWnd,
                      (HMENU)IDC_TELEGRAM_FAILURES, g_hInst, NULL);
         {
             int mode = db_get_setting_int("tg_notify_mode", 0);
@@ -406,7 +410,13 @@ static LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg,
                                    BM_SETCHECK, BST_CHECKED, 0);
         }
 
-        y += 40;
+        y += 30;
+        CreateWindow(WC_BUTTON, "Test Message",
+                     WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                     20, y, 110, 24, hWnd,
+                     (HMENU)IDC_TELEGRAM_TEST, g_hInst, NULL);
+
+        y += 36;
         CreateWindow("BUTTON", "OK",
                      WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                      170, y, 80, 25, hWnd,
@@ -527,6 +537,16 @@ static LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg,
                 EnableWindow(hChk, FALSE);
                 SendMessage(hChk, BM_SETCHECK, BST_UNCHECKED, 0);
             }
+            /* auto-save as user types */
+            extern void db_set_setting_str(const char *k,
+                const char *v);
+            db_set_setting_str("tg_bot_token", tok);
+            db_set_setting_str("tg_chat_id", cid);
+            return 0;
+        }
+        if (LOWORD(wParam) == IDC_TELEGRAM_TEST &&
+            HIWORD(wParam) == BN_CLICKED) {
+            telegram_test(hWnd);
             return 0;
         }
         if (LOWORD(wParam) == IDOK) {
@@ -602,7 +622,7 @@ static void show_settings(HWND hParent)
 
     HWND hDlg = CreateWindow("KSC_Settings", "KSC Settings",
                  WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
-                 CW_USEDEFAULT, CW_USEDEFAULT, 320, 480,
+                 CW_USEDEFAULT, CW_USEDEFAULT, 320, 550,
                  hParent, NULL, g_hInst, hParent);
     ShowWindow(hDlg, SW_SHOW);
     UpdateWindow(hDlg);

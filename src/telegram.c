@@ -15,25 +15,17 @@ static DWORD WINAPI telegram_thread(LPVOID param)
 
     if (!token[0] || !chatId[0]) { free(msg); return 0; }
 
-    /* URL-encode the message */
-    char encoded[2048];
-    int ep = 0;
-    for (int i = 0; msg[i] && ep < 2040; i++) {
-        unsigned char c = (unsigned char)msg[i];
-        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-            (c >= '0' && c <= '9') || c == '-' || c == '_' ||
-            c == '.' || c == '~' || c == ' ')
-            encoded[ep++] = (c == ' ') ? '+' : c;
-        else
-            ep += sprintf(encoded + ep, "%%%02X", c);
+    /* build JSON body — escape \, ", \n for JSON */
+    char json[4096];
+    int jp = 0;
+    jp += sprintf(json + jp, "{\"chat_id\":\"%s\",\"text\":\"", chatId);
+    for (int i = 0; msg[i] && jp < 4000; i++) {
+        if (msg[i] == '\\') { json[jp++] = '\\'; json[jp++] = '\\'; }
+        else if (msg[i] == '"') { json[jp++] = '\\'; json[jp++] = '"'; }
+        else if (msg[i] == '\n') { json[jp++] = '\\'; json[jp++] = 'n'; }
+        else json[jp++] = msg[i];
     }
-    encoded[ep] = '\0';
-
-    /* build JSON body */
-    char json[2560];
-    sprintf(json,
-        "{\"chat_id\":\"%s\",\"text\":\"%s\"}",
-        chatId, encoded);
+    jp += sprintf(json + jp, "\"}");
 
     wchar_t whost[256];
     MultiByteToWideChar(CP_UTF8, 0, "api.telegram.org", -1, whost, 256);
@@ -82,4 +74,12 @@ void telegram_send(const char *msg)
 {
     CreateThread(NULL, 0, telegram_thread,
                   _strdup(msg), 0, NULL);
+}
+
+void telegram_test(HWND hParent)
+{
+    telegram_send("\xE2\x9C\x85 ksc Telegram test \xE2\x80\x94 it works!");
+    MessageBox(hParent,
+        "Test message sent.\nCheck your Telegram group.",
+        "Telegram Test", MB_OK | MB_ICONINFORMATION);
 }
