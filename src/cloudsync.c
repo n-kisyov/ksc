@@ -246,10 +246,6 @@ static DWORD WINAPI cloudsync_backup_thread(LPVOID param)
     HWND hCloudWnd = (HWND)param;
     g_backupInProgress = 1;
 
-    if (!g_loggedIn) goto done;
-    if (!refresh_access_token()) goto done;
-    if (!ensure_ksc_folder()) goto done;
-
     SYSTEMTIME st;
     GetLocalTime(&st);
 
