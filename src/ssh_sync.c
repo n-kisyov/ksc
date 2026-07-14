@@ -7,6 +7,17 @@
 #include <libssh2.h>
 #include <libssh2_sftp.h>
 
+static WSADATA g_wsaData;
+static int g_wsaInit = 0;
+
+static void ensure_winsock(void)
+{
+    if (!g_wsaInit) {
+        WSAStartup(MAKEWORD(2, 2), &g_wsaData);
+        g_wsaInit = 1;
+    }
+}
+
 static char g_sshHost[256];
 static char g_sshUser[128];
 static int  g_sshPort = 22;
@@ -76,6 +87,8 @@ int ssh_sync_upload(const char *localPath, const char *remoteName)
     LIBSSH2_SFTP *sftp = NULL;
     LIBSSH2_SFTP_HANDLE *handle = NULL;
     int result = 0;
+
+    ensure_winsock();
 
     /* resolve host */
     struct addrinfo hints = {0}, *ai = NULL;
@@ -205,6 +218,8 @@ static DWORD WINAPI ssh_test_thread(LPVOID param)
     SOCKET sock = INVALID_SOCKET;
     LIBSSH2_SESSION *session = NULL;
     char *msg = "Connection failed: unknown error";
+
+    ensure_winsock();
 
     struct addrinfo hints = {0}, *ai = NULL;
     hints.ai_family = AF_UNSPEC;

@@ -475,7 +475,7 @@ void cloudsync_login(HWND hParent)
     WSAStartup(MAKEWORD(2, 2), &wsa);
 
     SOCKET srv = socket(AF_INET, SOCK_STREAM, 0);
-    if (srv == INVALID_SOCKET) { WSACleanup(); return; }
+    if (srv == INVALID_SOCKET) return;
 
     struct sockaddr_in addr = {0};
     addr.sin_family = AF_INET;
@@ -486,7 +486,7 @@ void cloudsync_login(HWND hParent)
         if (bind(srv, (struct sockaddr *)&addr, sizeof(addr)) == 0)
             break;
     }
-    if (port >= 65535) { closesocket(srv); WSACleanup(); return; }
+    if (port >= 65535) { closesocket(srv); return; }
     listen(srv, 1);
 
     /* PKCE: generate code_verifier and code_challenge */
@@ -574,7 +574,7 @@ void cloudsync_login(HWND hParent)
     FD_ZERO(&fds);
     FD_SET(srv, &fds);
     if (select(0, &fds, NULL, NULL, &tv) <= 0) {
-        closesocket(srv); WSACleanup(); return;
+        closesocket(srv); return;
     }
 
     SOCKET cli = accept(srv, NULL, NULL);
@@ -585,16 +585,16 @@ void cloudsync_login(HWND hParent)
 
     /* extract code */
     char *codeStart = strstr(req, "code=");
-    if (!codeStart) { closesocket(cli); WSACleanup(); return; }
+    if (!codeStart) { closesocket(cli); return; }
     codeStart += 5;
     char *codeEnd = strchr(codeStart, '&');
     if (!codeEnd) codeEnd = strchr(codeStart, ' ');
     if (!codeEnd) codeEnd = strchr(codeStart, '\r');
     if (!codeEnd) codeEnd = strchr(codeStart, '\n');
-    if (!codeEnd) { closesocket(cli); WSACleanup(); return; }
+    if (!codeEnd) { closesocket(cli); return; }
     int codeLen = (int)(codeEnd - codeStart);
     if (codeLen <= 0 || codeLen > 1023) {
-        closesocket(cli); WSACleanup(); return;
+        closesocket(cli); return;
     }
 
     char code[1024];
@@ -623,7 +623,6 @@ void cloudsync_login(HWND hParent)
                  "<p>You may close this tab.</p></body></html>";
     send(cli, page, (int)strlen(page), 0);
     closesocket(cli);
-    WSACleanup();
 
     /* exchange code for tokens */
     char body[1536];
