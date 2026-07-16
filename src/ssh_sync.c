@@ -125,8 +125,11 @@ int ssh_sync_upload(const char *localPath, const char *remoteName)
     if (libssh2_session_handshake(session, sock) != 0)
         goto done;
 
-    /* accept any host key */
-    libssh2_knownhost_init(session);
+    /* accept any host key (skip knownhosts verification) */
+    {
+        LIBSSH2_KNOWNHOSTS *kh = libssh2_knownhost_init(session);
+        if (kh) libssh2_knownhost_free(kh);
+    }
 
     /* authenticate with password */
     {
@@ -187,7 +190,7 @@ int ssh_sync_upload(const char *localPath, const char *remoteName)
     {
         char buf[32768];
         DWORD rd = 0;
-        int uploaded = 0;
+        int readOk = 1;
         while (ReadFile(hLocal, buf, sizeof(buf), &rd, NULL) && rd > 0) {
             int written = 0;
             while (written < (int)rd) {
@@ -195,8 +198,12 @@ int ssh_sync_upload(const char *localPath, const char *remoteName)
                                             rd - written);
                 if (rc < 0) { CloseHandle(hLocal); goto done; }
                 written += rc;
-                uploaded += rc;
             }
+        }
+        if (!readOk || GetLastError() != ERROR_SUCCESS &&
+            GetLastError() != ERROR_HANDLE_EOF) {
+            CloseHandle(hLocal);
+            goto done;
         }
     }
 
@@ -263,6 +270,11 @@ static DWORD WINAPI ssh_test_thread(LPVOID param)
     }
 
     {
+        LIBSSH2_KNOWNHOSTS *kh = libssh2_knownhost_init(session);
+        if (kh) libssh2_knownhost_free(kh);
+    }
+
+    {
         char passPath[MAX_PATH];
         get_ssh_pass_path(passPath, sizeof(passPath));
         HANDLE hf = CreateFile(passPath, GENERIC_READ,
@@ -307,8 +319,9 @@ fail:
 
 void ssh_sync_test(HWND hParent)
 {
-    CreateThread(NULL, 0, ssh_test_thread,
-                  (LPVOID)hParent, 0, NULL);
+    HANDLE h = CreateThread(NULL, 0, ssh_test_thread,
+                             (LPVOID)hParent, 0, NULL);
+    if (h) CloseHandle(h);
 }
 
 void ssh_sync_load_config(HWND hHostEdit, HWND hPortEdit,

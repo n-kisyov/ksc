@@ -167,7 +167,6 @@ static void load_folder_id(void)
         if (fgets(g_folderId, sizeof(g_folderId), f)) {
             char *nl = strchr(g_folderId, '\n');
             if (nl) *nl = '\0';
-            if (nl) *nl = '\0';
         }
         fclose(f);
     }
@@ -300,11 +299,12 @@ static DWORD WINAPI cloudsync_backup_thread(LPVOID param)
 
     int driveConfigured = g_loggedIn ? 1 : 0;
     int sshConfigured = ssh_sync_is_configured();
-    int driveOK = !driveConfigured; /* trivially OK if not configured */
-    int sshOK   = !sshConfigured;
+    int driveAttempted = 0, sshAttempted = 0;
+    int driveOK = 0, sshOK = 0;
 
     /* upload to Google Drive */
     if (driveConfigured) {
+        driveAttempted = 1;
         if (!refresh_access_token()) goto skip_drive;
         if (!ensure_ksc_folder())   goto skip_drive;
 
@@ -331,6 +331,7 @@ static DWORD WINAPI cloudsync_backup_thread(LPVOID param)
     /* upload to SSH */
     skip_drive:
     if (sshConfigured) {
+        sshAttempted = 1;
         int ok = 1;
         for (int i = 0; i < nFiles; i++) {
             sprintf(localBak, "%s\\%s", dir, bakNames[i]);
@@ -340,8 +341,8 @@ static DWORD WINAPI cloudsync_backup_thread(LPVOID param)
         sshOK = ok;
     }
 
-    /* delete local files only if all configured targets succeeded */
-    if (driveOK && sshOK) {
+    /* delete local files only if an upload was attempted and succeeded */
+    if ((driveAttempted && driveOK) || (sshAttempted && sshOK)) {
         for (int i = 0; i < nFiles; i++) {
             sprintf(localBak, "%s\\%s", dir, bakNames[i]);
             DeleteFile(localBak);
@@ -677,8 +678,9 @@ void cloudsync_backup_trigger(HWND hCloudWnd)
 {
     if ((!g_loggedIn && !ssh_sync_is_configured()) || g_backupInProgress)
         return;
-    CreateThread(NULL, 0, cloudsync_backup_thread,
-                  (LPVOID)hCloudWnd, 0, NULL);
+    HANDLE h = CreateThread(NULL, 0, cloudsync_backup_thread,
+                             (LPVOID)hCloudWnd, 0, NULL);
+    if (h) CloseHandle(h);
 }
 
 int cloudsync_load_history(CloudSyncEntry **out, int *pcount)

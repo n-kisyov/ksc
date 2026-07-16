@@ -72,8 +72,9 @@ static DWORD WINAPI telegram_thread(LPVOID param)
 
 void telegram_send(const char *msg)
 {
-    CreateThread(NULL, 0, telegram_thread,
-                  _strdup(msg), 0, NULL);
+    HANDLE h = CreateThread(NULL, 0, telegram_thread,
+                             _strdup(msg), 0, NULL);
+    if (h) CloseHandle(h);
 }
 
 void telegram_test(HWND hParent)

@@ -41,6 +41,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 
     HWND hWnd = gui_create_main_window(hInstance);
     if (!hWnd) {
+        keylog_close();
         db_close();
         return 1;
     }
@@ -96,6 +97,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
                    "Try running as administrator or check your permissions.",
                    "KSC Error", MB_ICONERROR);
         DestroyWindow(hWnd);
+        keylog_close();
         db_close();
         return 1;
     }
@@ -118,7 +120,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     keyhook_stop();
     db_flush_events();
     keylog_flush_events();
-    UnregisterHotKey(NULL, HOTKEY_ID_SHOW_KSC);
     tray_cleanup(hWnd, TRAY_ID);
     db_close();
     keylog_close();

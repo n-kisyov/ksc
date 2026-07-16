@@ -133,7 +133,10 @@ void db_close(void)
         g_writerRunning = FALSE;
         SetEvent(g_eventSignal);
         if (g_writerThread) {
-            WaitForSingleObject(g_writerThread, 5000);
+            DWORD wr = WaitForSingleObject(g_writerThread, 5000);
+            if (wr == WAIT_TIMEOUT) {
+                TerminateThread(g_writerThread, 0);
+            }
             CloseHandle(g_writerThread);
             g_writerThread = NULL;
         }
