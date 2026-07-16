@@ -125,12 +125,6 @@ int ssh_sync_upload(const char *localPath, const char *remoteName)
     if (libssh2_session_handshake(session, sock) != 0)
         goto done;
 
-    /* accept any host key (skip knownhosts verification) */
-    {
-        LIBSSH2_KNOWNHOSTS *kh = libssh2_knownhost_init(session);
-        if (kh) libssh2_knownhost_free(kh);
-    }
-
     /* authenticate with password */
     {
         char passPath[MAX_PATH];
@@ -190,7 +184,6 @@ int ssh_sync_upload(const char *localPath, const char *remoteName)
     {
         char buf[32768];
         DWORD rd = 0;
-        int readOk = 1;
         while (ReadFile(hLocal, buf, sizeof(buf), &rd, NULL) && rd > 0) {
             int written = 0;
             while (written < (int)rd) {
@@ -199,11 +192,6 @@ int ssh_sync_upload(const char *localPath, const char *remoteName)
                 if (rc < 0) { CloseHandle(hLocal); goto done; }
                 written += rc;
             }
-        }
-        if (!readOk || GetLastError() != ERROR_SUCCESS &&
-            GetLastError() != ERROR_HANDLE_EOF) {
-            CloseHandle(hLocal);
-            goto done;
         }
     }
 
@@ -267,11 +255,6 @@ static DWORD WINAPI ssh_test_thread(LPVOID param)
 
     if (libssh2_session_handshake(session, sock) != 0) {
         msg = "Connection failed: SSH handshake"; goto fail;
-    }
-
-    {
-        LIBSSH2_KNOWNHOSTS *kh = libssh2_knownhost_init(session);
-        if (kh) libssh2_knownhost_free(kh);
     }
 
     {
