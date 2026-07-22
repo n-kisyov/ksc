@@ -751,9 +751,9 @@ static const HeatKey g_heatKeys[] = {
     {'J',        357, 130, 41, 34, "J"},
     {'K',        403, 130, 41, 34, "K"},
     {'L',        449, 130, 41, 34, "L"},
-    {VK_OEM_1,   495, 130, 41, 34, ";"},
-    {VK_OEM_7,   541, 130, 41, 34, "'"},
-    {VK_RETURN,  588, 130, 93, 74, "Enter"},
+    {VK_OEM_1,   495, 130, 36, 34, ";"},
+    {VK_OEM_7,   536, 130, 36, 34, "'"},
+    {VK_RETURN,  577, 130, 64, 74, "Enter"},
 
     {VK_LSHIFT,   10, 170, 88, 34, "Shift"},
     {'Z',        103, 170, 41, 34, "Z"},
@@ -762,11 +762,11 @@ static const HeatKey g_heatKeys[] = {
     {'V',        241, 170, 41, 34, "V"},
     {'B',        287, 170, 41, 34, "B"},
     {'N',        333, 170, 41, 34, "N"},
-    {'M',        379, 170, 41, 34, "M"},
-    {VK_OEM_COMMA,425,170, 41, 34, ","},
-    {VK_OEM_PERIOD,471,170,41, 34, "."},
-    {VK_OEM_2,   517, 170, 41, 34, "/"},
-    {VK_RSHIFT,  564, 170, 117, 34, "Shift"},
+    {'M',        379, 170, 36, 34, "M"},
+    {VK_OEM_COMMA,420,170, 36, 34, ","},
+    {VK_OEM_PERIOD,461,170,36, 34, "."},
+    {VK_OEM_2,   502, 170, 36, 34, "/"},
+    {VK_RSHIFT,  543, 170, 54, 34, "Shift"},
 
     {VK_LCONTROL, 10, 210, 55, 34, "Ctrl"},
     {VK_LWIN,     70, 210, 45, 34, "Win"},
@@ -776,6 +776,38 @@ static const HeatKey g_heatKeys[] = {
     {VK_RWIN,    508, 210, 45, 34, "Win"},
     {VK_APPS,    558, 210, 45, 34, "Menu"},
     {VK_RCONTROL,608, 210, 55, 34, "Ctrl"},
+
+    /* Insert block */
+    {VK_INSERT,  665,  50, 40, 34, "Ins"},
+    {VK_HOME,    710,  50, 40, 34, "Home"},
+    {VK_PRIOR,   755,  50, 40, 34, "PgUp"},
+    {VK_DELETE,  665,  90, 40, 34, "Del"},
+    {VK_END,     710,  90, 40, 34, "End"},
+    {VK_NEXT,    755,  90, 40, 34, "PgDn"},
+
+    /* Arrow cluster */
+    {VK_UP,      710, 155, 40, 34, "Up"},
+    {VK_LEFT,    665, 195, 40, 34, "Left"},
+    {VK_DOWN,    710, 195, 40, 34, "Down"},
+    {VK_RIGHT,   755, 195, 40, 34, "Right"},
+
+    /* Numpad */
+    {VK_NUMLOCK, 665, 240, 45, 34, "Num"},
+    {VK_DIVIDE,  715, 240, 40, 34, "/"},
+    {VK_MULTIPLY,760, 240, 40, 34, "*"},
+    {VK_SUBTRACT,665, 280, 40, 34, "-"},
+    {VK_NUMPAD7, 710, 280, 40, 34, "7"},
+    {VK_NUMPAD8, 755, 280, 40, 34, "8"},
+    {VK_NUMPAD9, 665, 320, 40, 34, "9"},
+    {VK_ADD,     710, 320, 40, 74, "+"},
+    {VK_NUMPAD4, 755, 320, 40, 34, "4"},
+    {VK_NUMPAD5, 710, 360, 40, 34, "5"},
+    {VK_NUMPAD1, 755, 360, 40, 34, "1"},
+    {VK_NUMPAD6, 665, 360, 40, 34, "6"},
+    {VK_NUMPAD2, 755, 400, 40, 34, "2"},
+    {VK_NUMPAD3, 665, 400, 40, 34, "3"},
+    {VK_NUMPAD0, 710, 400, 40, 34, "0"},
+    {VK_DECIMAL, 755, 400, 40, 34, "."},
 };
 
 #define HEAT_KEY_COUNT (sizeof(g_heatKeys) / sizeof(g_heatKeys[0]))
@@ -822,7 +854,8 @@ static COLORREF heat_color(int64_t count, int64_t max_count)
 }
 
 static void draw_heatmap(HWND hWnd, HDC hdc, RECT *rcClient,
-                         const char *appFilter)
+                         const char *appFilter, int hoverIdx,
+                         int pulseFrame, int64_t *outMax)
 {
     BOOL dark = db_get_setting_int("dark_mode", 0);
     COLORREF bgColor = dark ? RGB(40, 40, 45) : RGB(245, 245, 248);
@@ -897,6 +930,30 @@ static void draw_heatmap(HWND hWnd, HDC hdc, RECT *rcClient,
         DeleteObject(hKeyBr);
         SelectObject(hdc, hPen);
 
+        /* pulse animation: glow on top keys */
+        if (pulseFrame > 0 && pulseFrame <= 20 &&
+            maxCount > 0 && cnt > 0 &&
+            cnt >= maxCount * 80 / 100) {
+            int alpha = (20 - pulseFrame) * 6;
+            if (alpha > 180) alpha = 180;
+            COLORREF glow = RGB(255, 255, 100 + alpha/2);
+            HPEN hGlow = CreatePen(PS_SOLID, 3, glow);
+            SelectObject(hdc, hGlow);
+            Rectangle(hdc, hk->x - 1, hk->y - 1,
+                      hk->x + hk->w + 1, hk->y + hk->h + 1);
+            DeleteObject(hGlow);
+            SelectObject(hdc, hPen);
+        }
+
+        /* hover highlight */
+        if (i == hoverIdx) {
+            HPEN hHi = CreatePen(PS_SOLID, 2, RGB(255, 255, 255));
+            SelectObject(hdc, hHi);
+            Rectangle(hdc, hk->x, hk->y, hk->x + hk->w, hk->y + hk->h);
+            DeleteObject(hHi);
+            SelectObject(hdc, hPen);
+        }
+
         if (hk->label && hk->label[0]) {
             double t = (maxCount > 0) ? (double)cnt / (double)maxCount : 0.0;
             SetTextColor(hdc, (t > 0.6) ? textHot : textCold);
@@ -905,12 +962,31 @@ static void draw_heatmap(HWND hWnd, HDC hdc, RECT *rcClient,
         }
     }
 
+    /* hover tooltip */
+    if (hoverIdx >= 0 && hoverIdx < (int)HEAT_KEY_COUNT) {
+        const HeatKey *hk = &g_heatKeys[hoverIdx];
+        int64_t cnt = counts[hk->vk];
+        char tip[128];
+        double pct = (maxCount > 0) ? (double)cnt / (double)maxCount * 100.0 : 0.0;
+        sprintf(tip, "%s: %lld (%.1f%%)",
+                hk->label ? hk->label : "?", (long long)cnt, pct);
+        int tx = hk->x + hk->w + 5;
+        int ty = hk->y;
+        if (tx + 180 > rcClient->right) tx = hk->x - 185;
+        SetBkMode(hdc, OPAQUE);
+        SetBkColor(hdc, dark ? RGB(50, 50, 55) : RGB(250, 250, 250));
+        SetTextColor(hdc, dark ? RGB(230, 230, 230) : RGB(20, 20, 30));
+        RECT tr = {tx, ty, tx + 180, ty + 20};
+        DrawText(hdc, tip, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        SetBkMode(hdc, TRANSPARENT);
+    }
+
     SelectObject(hdc, hOldPen);
     DeleteObject(hPen);
     SelectObject(hdc, hOldFont);
     DeleteObject(hFont);
 
-    int legendY = 265;
+    int legendY = 300;
     COLORREF legendSteps[] = {
         heat_color(0, 100),
         heat_color(20, 100),
@@ -919,46 +995,59 @@ static void draw_heatmap(HWND hWnd, HDC hdc, RECT *rcClient,
         heat_color(80, 100),
         heat_color(100, 100),
     };
-    int segW = 50;
-    int legendX = rcClient->right / 2 - (6 * segW) / 2;
+    int segW = 55;
+    int legendX = 15;
 
     SetTextColor(hdc, dark ? RGB(200, 200, 210) : RGB(80, 80, 90));
-    HFONT hSmFont = CreateFont(11, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+    HFONT hSmFont = CreateFont(10, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
                                 CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                                 DEFAULT_PITCH | FF_DONTCARE, "Segoe UI");
     SelectObject(hdc, hSmFont);
 
-    RECT ll = {legendX - 5, legendY + 14, legendX + 6 * segW + 5, legendY + 36};
-    DrawText(hdc, "low", -1, &ll, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    ll.left = legendX + 6 * segW - 35;
-    DrawText(hdc, "high", -1, &ll, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
-
     for (int i = 0; i < 6; i++) {
         HBRUSH hLBr = CreateSolidBrush(legendSteps[i]);
         SelectObject(hdc, hLBr);
         Rectangle(hdc, legendX + i * segW, legendY + 2,
-                  legendX + (i + 1) * segW, legendY + 28);
+                  legendX + (i + 1) * segW, legendY + 22);
         DeleteObject(hLBr);
         SelectObject(hdc, hPen);
+    }
+    /* count labels */
+    for (int i = 0; i < 6; i++) {
+        char lbl[32];
+        if (maxCount > 0)
+            sprintf(lbl, "%lld", (long long)(maxCount * i / 5));
+        else
+            strcpy(lbl, "0");
+        RECT lr = {legendX + i * segW, legendY + 24,
+                   legendX + (i + 1) * segW, legendY + 40};
+        DrawText(hdc, lbl, -1, &lr, DT_CENTER | DT_TOP | DT_SINGLELINE);
     }
 
     SelectObject(hdc, hOldPen);
     SelectObject(hdc, hOldFont);
     DeleteObject(hSmFont);
+
+    if (outMax) *outMax = maxCount;
 }
 
 static LRESULT CALLBACK HeatmapWndProc(HWND hWnd, UINT msg,
                                         WPARAM wParam, LPARAM lParam)
 {
+    static int g_pulseFrame = 0;
+    static int g_hoverIdx = -1;
+    static int64_t g_pulseMax = 0;
+
     switch (msg) {
     case WM_CREATE: {
         SetTimer(hWnd, ID_TIMER_REFRESH, 10000, NULL);
+        SetTimer(hWnd, 99, 40, NULL); /* pulse animation timer */
 
         HWND hCombo = CreateWindow(WC_COMBOBOX, "",
                         WS_CHILD | WS_VISIBLE |
                         CBS_DROPDOWNLIST | WS_VSCROLL,
-                        10, 293, 200, 200,
+                        10, 330, 200, 200,
                         hWnd, (HMENU)IDC_HEATMAP_APP_COMBO,
                         g_hInst, NULL);
         SendMessage(hCombo, CB_ADDSTRING, 0,
@@ -992,6 +1081,15 @@ static LRESULT CALLBACK HeatmapWndProc(HWND hWnd, UINT msg,
     }
     case WM_TIMER:
         if (wParam == ID_TIMER_REFRESH) InvalidateRect(hWnd, NULL, FALSE);
+        else if (wParam == 99) {
+            g_pulseFrame++;
+            if (g_pulseFrame > 30) {
+                g_pulseFrame = 0;
+                KillTimer(hWnd, 99);
+            }
+            InvalidateRect(hWnd, NULL, FALSE);
+            if (g_pulseFrame == 0) return 0;
+        }
         return 0;
     case WM_ERASEBKGND:
         return TRUE;
@@ -1008,14 +1106,44 @@ static LRESULT CALLBACK HeatmapWndProc(HWND hWnd, UINT msg,
             if (sel > 0) {
                 static char buf[256];
                 buf[0] = '\0';
-                SendMessage(hCombo, CB_GETLBTEXT, sel,
-                            (LPARAM)buf);
+                SendMessage(hCombo, CB_GETLBTEXT, sel, (LPARAM)buf);
                 if (buf[0]) appFilter = buf;
             }
         }
-        draw_heatmap(hWnd, hdc, &rc, appFilter);
+        draw_heatmap(hWnd, hdc, &rc, appFilter,
+                     g_hoverIdx, g_pulseFrame, &g_pulseMax);
         EndPaint(hWnd, &ps);
         return 0;
+    }
+
+    case WM_MOUSEMOVE: {
+        int mx = LOWORD(lParam), my = HIWORD(lParam);
+        int found = -1;
+        for (int i = 0; i < (int)HEAT_KEY_COUNT; i++) {
+            const HeatKey *hk = &g_heatKeys[i];
+            if (mx >= hk->x && mx < hk->x + hk->w &&
+                my >= hk->y && my < hk->y + hk->h) {
+                found = i; break;
+            }
+        }
+        if (found != g_hoverIdx) {
+            g_hoverIdx = found;
+            InvalidateRect(hWnd, NULL, FALSE);
+        }
+        return 0;
+    }
+
+    case WM_LBUTTONDOWN: {
+        int mx = LOWORD(lParam), my = HIWORD(lParam);
+        for (int i = 0; i < (int)HEAT_KEY_COUNT; i++) {
+            const HeatKey *hk = &g_heatKeys[i];
+            if (mx >= hk->x && mx < hk->x + hk->w &&
+                my >= hk->y && my < hk->y + hk->h) {
+                show_stats_window(hWnd);
+                return 0;
+            }
+        }
+        break;
     }
 
     case WM_COMMAND:
@@ -1026,6 +1154,7 @@ static LRESULT CALLBACK HeatmapWndProc(HWND hWnd, UINT msg,
         return 0;
     case WM_CLOSE:
         KillTimer(hWnd, ID_TIMER_REFRESH);
+        KillTimer(hWnd, 99);
         DestroyWindow(hWnd);
         return 0;
     }
@@ -1049,7 +1178,7 @@ static void show_heatmap(HWND hParent)
 
     HWND hDlg = CreateWindow("KSC_Heatmap", "KSC - Key Heatmap",
                  WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
-                 CW_USEDEFAULT, CW_USEDEFAULT, 708, 370,
+                 CW_USEDEFAULT, CW_USEDEFAULT, 810, 410,
                  hParent, NULL, g_hInst, NULL);
     ShowWindow(hDlg, SW_SHOW);
     UpdateWindow(hDlg);
