@@ -28,6 +28,13 @@
 #define TDF_POSITION_RELATIVE_TO_WINDOW 0x1000
 #endif
 
+#ifndef TTM_TRACKACTIVATE
+#define TTM_TRACKACTIVATE (WM_USER + 17)
+#endif
+#ifndef TTM_TRACKPOSITION
+#define TTM_TRACKPOSITION  (WM_USER + 18)
+#endif
+
 #define WM_TRAYICON      (WM_APP + 1)
 #define WM_THEME_CHANGED (WM_APP + 2)
 

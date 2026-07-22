@@ -793,22 +793,22 @@ static const HeatKey g_heatKeys[] = {
     {VK_RIGHT,   780, 195, 36, 34, "Right"},
 
     /* Numpad */
-    {VK_NUMLOCK, 830, 240, 45, 34, "Num"},
-    {VK_DIVIDE,  880, 240, 35, 34, "/"},
-    {VK_MULTIPLY,920, 240, 35, 34, "*"},
-    {VK_SUBTRACT,830, 280, 35, 34, "-"},
-    {VK_NUMPAD7, 870, 280, 35, 34, "7"},
-    {VK_NUMPAD8, 910, 280, 35, 34, "8"},
-    {VK_NUMPAD9, 830, 320, 35, 34, "9"},
-    {VK_ADD,     870, 320, 35, 74, "+"},
-    {VK_NUMPAD4, 910, 320, 35, 34, "4"},
-    {VK_NUMPAD5, 830, 360, 35, 34, "5"},
-    {VK_NUMPAD1, 870, 360, 35, 34, "1"},
-    {VK_NUMPAD6, 910, 360, 35, 34, "6"},
-    {VK_NUMPAD2, 830, 400, 35, 34, "2"},
-    {VK_NUMPAD3, 870, 400, 35, 34, "3"},
-    {VK_NUMPAD0, 910, 400, 35, 34, "0"},
-    {VK_DECIMAL, 830, 440, 35, 34, "."},
+    {VK_NUMLOCK, 830,  50, 40, 34, "Num"},
+    {VK_DIVIDE,  875,  50, 35, 34, "/"},
+    {VK_MULTIPLY,915,  50, 35, 34, "*"},
+    {VK_SUBTRACT,830,  90, 40, 34, "-"},
+    {VK_NUMPAD7, 875,  90, 35, 34, "7"},
+    {VK_NUMPAD8, 915,  90, 35, 34, "8"},
+    {VK_ADD,     830, 130, 40, 74, "+"},
+    {VK_NUMPAD9, 875, 130, 35, 34, "9"},
+    {VK_NUMPAD4, 915, 130, 35, 34, "4"},
+    {VK_NUMPAD5, 875, 170, 35, 34, "5"},
+    {VK_NUMPAD6, 915, 170, 35, 34, "6"},
+    {VK_NUMPAD1, 875, 210, 35, 34, "1"},
+    {VK_NUMPAD2, 915, 210, 35, 34, "2"},
+    {VK_NUMPAD3, 875, 250, 35, 34, "3"},
+    {VK_NUMPAD0, 830, 250, 85, 34, "0"},
+    {VK_DECIMAL, 915, 250, 35, 34, "."},
 };
 
 #define HEAT_KEY_COUNT (sizeof(g_heatKeys) / sizeof(g_heatKeys[0]))
@@ -986,35 +986,26 @@ static void draw_heatmap(HWND hWnd, HDC hdc, RECT *rcClient,
     SelectObject(hdc, hOldFont);
     DeleteObject(hSmFont);
 }
-
 static LRESULT CALLBACK HeatmapWndProc(HWND hWnd, UINT msg,
                                         WPARAM wParam, LPARAM lParam)
 {
-    static HWND g_hTooltip = NULL;
-    static TOOLINFO g_ti = {0};
+    static HWND g_tipLabel = NULL;
+    static int64_t g_counts[256];
+    static int64_t g_maxCnt;
 
     switch (msg) {
     case WM_CREATE: {
         SetTimer(hWnd, ID_TIMER_REFRESH, 10000, NULL);
 
-        /* tooltip control */
-        g_hTooltip = CreateWindow(TOOLTIPS_CLASS, NULL,
-            WS_POPUP | TTS_ALWAYSTIP,
-            CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
+        g_tipLabel = CreateWindow(WC_STATIC, "",
+            WS_CHILD | SS_LEFT, 0, 0, 180, 20,
             hWnd, NULL, g_hInst, NULL);
-        memset(&g_ti, 0, sizeof(g_ti));
-        g_ti.cbSize = sizeof(g_ti);
-        g_ti.uFlags = TTF_SUBCLASS;
-        g_ti.hwnd = hWnd;
-        g_ti.lpszText = (LPSTR)"";
-        SendMessage(g_hTooltip, TTM_ADDTOOL, 0, (LPARAM)&g_ti);
-        SendMessage(g_hTooltip, TTM_SETMAXTIPWIDTH, 0, 300);
-        SendMessage(g_hTooltip, TTM_SETDELAYTIME, TTDT_AUTOPOP, 5000);
+        ShowWindow(g_tipLabel, SW_HIDE);
 
         HWND hCombo = CreateWindow(WC_COMBOBOX, "",
                         WS_CHILD | WS_VISIBLE |
                         CBS_DROPDOWNLIST | WS_VSCROLL,
-                        10, 340, 200, 200,
+                        10, 345, 200, 200,
                         hWnd, (HMENU)IDC_HEATMAP_APP_COMBO,
                         g_hInst, NULL);
         SendMessage(hCombo, CB_ADDSTRING, 0,
@@ -1056,7 +1047,6 @@ static LRESULT CALLBACK HeatmapWndProc(HWND hWnd, UINT msg,
         HDC hdc = BeginPaint(hWnd, &ps);
         RECT rc;
         GetClientRect(hWnd, &rc);
-
         const char *appFilter = NULL;
         {
             HWND hCombo = GetDlgItem(hWnd, IDC_HEATMAP_APP_COMBO);
@@ -1066,6 +1056,25 @@ static LRESULT CALLBACK HeatmapWndProc(HWND hWnd, UINT msg,
                 buf[0] = '\0';
                 SendMessage(hCombo, CB_GETLBTEXT, sel, (LPARAM)buf);
                 if (buf[0]) appFilter = buf;
+            }
+        }
+        /* refresh cached counts */
+        memset(g_counts, 0, sizeof(g_counts));
+        g_maxCnt = 0;
+        {
+            KeyStat *stats = NULL;
+            int ns = db_get_stats(&stats);
+            if (stats && ns > 0) {
+                for (int j = 0; j < ns; j++) {
+                    if (stats[j].key_code >= 0 &&
+                        stats[j].key_code < 256) {
+                        g_counts[stats[j].key_code] =
+                            stats[j].count;
+                        if (stats[j].count > g_maxCnt)
+                            g_maxCnt = stats[j].count;
+                    }
+                }
+                db_free_stats(stats);
             }
         }
         draw_heatmap(hWnd, hdc, &rc, appFilter);
@@ -1079,56 +1088,22 @@ static LRESULT CALLBACK HeatmapWndProc(HWND hWnd, UINT msg,
             const HeatKey *hk = &g_heatKeys[i];
             if (mx >= hk->x && mx < hk->x + hk->w &&
                 my >= hk->y && my < hk->y + hk->h) {
-                int64_t cnt = 0, maxCnt = 0;
-                {
-                    int64_t counts[256] = {0};
-                    KeyStat *stats = NULL;
-                    int ns = db_get_stats(&stats);
-                    if (stats && ns > 0) {
-                        for (int j = 0; j < ns; j++) {
-                            if (stats[j].key_code >= 0 &&
-                                stats[j].key_code < 256) {
-                                counts[stats[j].key_code] =
-                                    stats[j].count;
-                                if (stats[j].count > maxCnt)
-                                    maxCnt = stats[j].count;
-                            }
-                        }
-                        db_free_stats(stats);
-                    }
-                    cnt = counts[hk->vk];
-                }
                 char tip[128];
-                double pct = (maxCnt > 0) ?
-                    (double)cnt / (double)maxCnt * 100.0 : 0.0;
+                double pct = (g_maxCnt > 0) ?
+                    (double)g_counts[hk->vk] /
+                    (double)g_maxCnt * 100.0 : 0.0;
                 sprintf(tip, "%s: %lld (%.1f%%)",
                     hk->label ? hk->label : "?",
-                    (long long)cnt, pct);
-                g_ti.lpszText = tip;
-                SendMessage(g_hTooltip, TTM_UPDATETIPTEXT,
-                            0, (LPARAM)&g_ti);
-                SendMessage(g_hTooltip, TTM_TRACKACTIVATE,
-                    TRUE, (LPARAM)&g_ti);
-                SendMessage(g_hTooltip, TTM_TRACKPOSITION,
-                    0, MAKELPARAM(hk->x + hk->w + 5, hk->y));
+                    (long long)g_counts[hk->vk], pct);
+                SetWindowText(g_tipLabel, tip);
+                SetWindowPos(g_tipLabel, HWND_TOP,
+                    hk->x + hk->w + 5, hk->y, 180, 20,
+                    SWP_SHOWWINDOW | SWP_NOACTIVATE);
                 return 0;
             }
         }
-        SendMessage(g_hTooltip, TTM_TRACKACTIVATE, FALSE, 0);
+        ShowWindow(g_tipLabel, SW_HIDE);
         return 0;
-    }
-
-    case WM_LBUTTONDOWN: {
-        int mx = LOWORD(lParam), my = HIWORD(lParam);
-        for (int i = 0; i < (int)HEAT_KEY_COUNT; i++) {
-            const HeatKey *hk = &g_heatKeys[i];
-            if (mx >= hk->x && mx < hk->x + hk->w &&
-                my >= hk->y && my < hk->y + hk->h) {
-                show_stats_window(hWnd);
-                return 0;
-            }
-        }
-        break;
     }
 
     case WM_COMMAND:
@@ -1162,7 +1137,7 @@ static void show_heatmap(HWND hParent)
 
     HWND hDlg = CreateWindow("KSC_Heatmap", "KSC - Key Heatmap",
                  WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
-                 CW_USEDEFAULT, CW_USEDEFAULT, 970, 430,
+                 CW_USEDEFAULT, CW_USEDEFAULT, 970, 400,
                  hParent, NULL, g_hInst, NULL);
     ShowWindow(hDlg, SW_SHOW);
     UpdateWindow(hDlg);
