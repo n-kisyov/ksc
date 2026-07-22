@@ -84,6 +84,8 @@ int keylog_open(void)
         return 0;
     }
 
+    sqlite3_exec(g_klogDb, "PRAGMA journal_mode=WAL;", NULL, NULL, NULL);
+
     InitializeCriticalSection(&g_klogCs);
     g_klogSignal = CreateEvent(NULL, FALSE, FALSE, NULL);
     g_klogRunning = TRUE;

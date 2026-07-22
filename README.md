@@ -1,6 +1,6 @@
 # ⌨️ ksc — Keystroke Counter
 
-**v0.9.5rc1** — Lightweight Windows desktop app in modern C that counts keystrokes, tracks per-app usage, and syncs encrypted backups to Google Drive and SSH.
+**v1.1** — Lightweight Windows desktop app (~6.5k LOC) in modern C that counts keystrokes, tracks per-app usage, simulates keyboard input, syncs encrypted backups to Google Drive and SSH, and sends Telegram notifications.
 
 ## 📸 Screenshots
 
@@ -23,10 +23,15 @@
 - **Batch writes** — Ring buffer + writer threads flush DB in transactions
 
 ### 🪟 Windows & Views
-- **Heatmap** — Full QWERTY layout colored by usage frequency (blue → red)
+- **Heatmap** — Full QWERTY layout + numpad + arrows colored by usage frequency (blue → red), tooltips on hover, app filter
 - **Statistics** — Date range pickers, app filter, keyboard/mouse totals, CSV export
 - **Keylogger** — Timestamped per‑key recording to a separate database; own viewer window
 - **Mouse clicker** — Min/sec/ms interval, random offset, left/right button, continuous/limited, system‑wide hotkeys
+- **Keyboard simulator** — Record key combos, replay with configurable interval, system‑wide start/stop hotkeys
+
+### 🔔 Notifications
+- **Telegram** — Bot token + group chat ID; sends sync status on success or failure only
+- **Test button** in settings for end‑to‑end verification
 
 ### 🎨 UI
 - **Dark mode** — Full dark theme (title bar, scrollbar, menus, all child windows)
@@ -64,6 +69,10 @@
 | Reset All Statistics | — | Clears counts, keeps settings |
 | Delete Keylogger Logs | — | Deletes keylogger database |
 | Show KSC Shortcut | Ctrl+Shift+K | System‑wide hotkey |
+| Enable Telegram | OFF | Sends sync status to Telegram group |
+| Bot Token / Chat ID | — | Telegram bot credentials |
+| Notify mode | All | Success+failures or failures only |
+| Test Message | — | Sends a test message to the group |
 
 All settings stored in SQLite.
 
@@ -96,10 +105,8 @@ Import-Certificate -FilePath .\ksc.cer -CertStoreLocation Cert:\CurrentUser\Trus
 
 ## 🗺️ Future Plans
 
-- Keyboard simulator (companion to mouse clicker)
 - Idle detection & session tracking
 - Portable mode (store DBs alongside `.exe`)
-- Per‑app heatmap filtering
 - Typing speed display (live WPM)
 - Linux support (X11/Wayland)
 

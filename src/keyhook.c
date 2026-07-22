@@ -130,8 +130,11 @@ const char *keyhook_get_name(unsigned int vk_code)
         return buf;
     }
 
-    static char buf[16];
-    sprintf(buf, "Key 0x%02X", vk_code);
+    static char buf[32];
+    if (vk_code >= VK_OEM_1 && vk_code <= VK_OEM_8)
+        sprintf(buf, "OEM %d", vk_code - VK_OEM_1 + 1);
+    else
+        sprintf(buf, "Key 0x%02X", vk_code);
     return buf;
 }
 

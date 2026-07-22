@@ -31,5 +31,6 @@ void db_flush_events(void);
 void db_reset_stats(void);
 int64_t db_get_today_count(void);
 void db_get_db_dir(char *buf, int bufsize);
+int  db_backup_safe(const char *destPath);
 
 #endif

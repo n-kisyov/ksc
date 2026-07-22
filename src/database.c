@@ -118,6 +118,8 @@ int db_init(void)
         return 0;
     }
 
+    sqlite3_exec(g_db, "PRAGMA journal_mode=WAL;", NULL, NULL, NULL);
+
     InitializeCriticalSection(&g_eventCs);
     g_eventSignal = CreateEvent(NULL, FALSE, FALSE, NULL);
     g_writerRunning = TRUE;
@@ -526,4 +528,29 @@ void db_get_db_dir(char *buf, int bufsize)
         sprintf(buf, "%s\\KSC", appdata);
     else
         strcpy(buf, ".");
+}
+
+int db_backup_safe(const char *destPath)
+{
+    sqlite3 *backupDb = NULL;
+    sqlite3_backup *bk = NULL;
+    int rc;
+
+    if (!g_db) return 0;
+
+    rc = sqlite3_open_v2(destPath, &backupDb,
+        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, NULL);
+    if (rc != SQLITE_OK) return 0;
+
+    bk = sqlite3_backup_init(backupDb, "main", g_db, "main");
+    if (!bk) { sqlite3_close(backupDb); return 0; }
+
+    do {
+        rc = sqlite3_backup_step(bk, -1);
+    } while (rc == SQLITE_OK || rc == SQLITE_BUSY || rc == SQLITE_LOCKED);
+
+    sqlite3_backup_finish(bk);
+    sqlite3_close(backupDb);
+
+    return (rc == SQLITE_DONE) ? 1 : 0;
 }

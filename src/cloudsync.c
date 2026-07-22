@@ -3,6 +3,7 @@
 #include "cloudsync.h"
 #include "ssh_sync.h"
 #include "telegram.h"
+#include "database.h"
 #include "ksc_private.h"
 #include <dpapi.h>
 #include <winhttp.h>
@@ -265,7 +266,7 @@ static DWORD WINAPI cloudsync_backup_thread(LPVOID param)
     sprintf(src, "%s\\ksc.db", dir);
     sprintf(bakNames[nFiles], "ksc_backup_%s.db", ts);
     sprintf(localBak, "%s\\%s", dir, bakNames[nFiles]);
-    if (CopyFile(src, localBak, FALSE)) {
+    if (db_backup_safe(localBak)) {
         HANDLE hf = CreateFile(localBak, GENERIC_READ,
             FILE_SHARE_READ, NULL, OPEN_EXISTING,
             FILE_ATTRIBUTE_NORMAL, NULL);

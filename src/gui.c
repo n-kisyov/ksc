@@ -3940,7 +3940,7 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg,
             char src[300], dst[300];
             sprintf(src, "%s\\ksc.db", dir);
             sprintf(dst, "%s\\ksc_backup_%s.db", dir, ts);
-            if (CopyFile(src, dst, FALSE)) {
+            if (db_backup_safe(dst)) {
                 char klogSrc[300], klogDst[300];
                 sprintf(klogSrc, "%s\\ksc_keylog.db", dir);
                 sprintf(klogDst, "%s\\ksc_keylog_backup_%s.db",

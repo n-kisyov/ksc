@@ -41,6 +41,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 
     HWND hWnd = gui_create_main_window(hInstance);
     if (!hWnd) {
+        db_flush_events();
+        keylog_flush_events();
         keylog_close();
         db_close();
         return 1;
@@ -97,6 +99,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
                    "Try running as administrator or check your permissions.",
                    "KSC Error", MB_ICONERROR);
         DestroyWindow(hWnd);
+        db_flush_events();
+        keylog_flush_events();
         keylog_close();
         db_close();
         return 1;
