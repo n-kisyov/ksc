@@ -1047,6 +1047,12 @@ static LRESULT CALLBACK HeatmapWndProc(HWND hWnd, UINT msg,
         HDC hdc = BeginPaint(hWnd, &ps);
         RECT rc;
         GetClientRect(hWnd, &rc);
+
+        /* double-buffer: draw to memory DC, then copy to screen */
+        HDC memDC = CreateCompatibleDC(hdc);
+        HBITMAP memBmp = CreateCompatibleBitmap(hdc, rc.right, rc.bottom);
+        HBITMAP oldBmp = SelectObject(memDC, memBmp);
+
         const char *appFilter = NULL;
         {
             HWND hCombo = GetDlgItem(hWnd, IDC_HEATMAP_APP_COMBO);
@@ -1077,7 +1083,12 @@ static LRESULT CALLBACK HeatmapWndProc(HWND hWnd, UINT msg,
                 db_free_stats(stats);
             }
         }
-        draw_heatmap(hWnd, hdc, &rc, appFilter);
+        draw_heatmap(hWnd, memDC, &rc, appFilter);
+
+        BitBlt(hdc, 0, 0, rc.right, rc.bottom, memDC, 0, 0, SRCCOPY);
+        SelectObject(memDC, oldBmp);
+        DeleteObject(memBmp);
+        DeleteDC(memDC);
         EndPaint(hWnd, &ps);
         return 0;
     }
