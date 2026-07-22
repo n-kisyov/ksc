@@ -993,6 +993,7 @@ static LRESULT CALLBACK HeatmapWndProc(HWND hWnd, UINT msg,
     static HWND g_tipLabel = NULL;
     static int64_t g_counts[256];
     static int64_t g_maxCnt;
+    static int64_t g_totalClicks;
 
     switch (msg) {
     case WM_CREATE: {
@@ -1068,6 +1069,7 @@ static LRESULT CALLBACK HeatmapWndProc(HWND hWnd, UINT msg,
         /* refresh cached counts */
         memset(g_counts, 0, sizeof(g_counts));
         g_maxCnt = 0;
+        g_totalClicks = 0;
         {
             KeyStat *stats = NULL;
             int ns = db_get_stats(&stats);
@@ -1077,6 +1079,7 @@ static LRESULT CALLBACK HeatmapWndProc(HWND hWnd, UINT msg,
                         stats[j].key_code < 256) {
                         g_counts[stats[j].key_code] =
                             stats[j].count;
+                        g_totalClicks += stats[j].count;
                         if (stats[j].count > g_maxCnt)
                             g_maxCnt = stats[j].count;
                     }
@@ -1101,9 +1104,9 @@ static LRESULT CALLBACK HeatmapWndProc(HWND hWnd, UINT msg,
             if (mx >= hk->x && mx < hk->x + hk->w &&
                 my >= hk->y && my < hk->y + hk->h) {
                 char tip[128];
-                double pct = (g_maxCnt > 0) ?
+                double pct = (g_totalClicks > 0) ?
                     (double)g_counts[hk->vk] /
-                    (double)g_maxCnt * 100.0 : 0.0;
+                    (double)g_totalClicks * 100.0 : 0.0;
                 sprintf(tip, "%s: %lld (%.1f%%)",
                     hk->label ? hk->label : "?",
                     (long long)g_counts[hk->vk], pct);
