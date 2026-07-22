@@ -20,6 +20,7 @@ static HWND g_hClickerWnd = NULL;
 static HWND g_hTotalLabel = NULL;
 
 static void format_shortcut(int packed, char *buf, int bufsize);
+static void show_stats_window(HWND hParent);
 
 typedef void (WINAPI *fnSetPreferredAppMode)(int mode);
 typedef BOOL (WINAPI *fnAllowDarkModeForWindow)(HWND hWnd, BOOL allow);
@@ -778,36 +779,36 @@ static const HeatKey g_heatKeys[] = {
     {VK_RCONTROL,608, 210, 55, 34, "Ctrl"},
 
     /* Insert block */
-    {VK_INSERT,  665,  50, 40, 34, "Ins"},
-    {VK_HOME,    710,  50, 40, 34, "Home"},
-    {VK_PRIOR,   755,  50, 40, 34, "PgUp"},
-    {VK_DELETE,  665,  90, 40, 34, "Del"},
-    {VK_END,     710,  90, 40, 34, "End"},
-    {VK_NEXT,    755,  90, 40, 34, "PgDn"},
+    {VK_INSERT,  625,  50, 36, 34, "Ins"},
+    {VK_HOME,    665,  50, 36, 34, "Home"},
+    {VK_PRIOR,   705,  50, 36, 34, "PgUp"},
+    {VK_DELETE,  625,  90, 36, 34, "Del"},
+    {VK_END,     665,  90, 36, 34, "End"},
+    {VK_NEXT,    705,  90, 36, 34, "PgDn"},
 
     /* Arrow cluster */
-    {VK_UP,      710, 155, 40, 34, "Up"},
-    {VK_LEFT,    665, 195, 40, 34, "Left"},
-    {VK_DOWN,    710, 195, 40, 34, "Down"},
-    {VK_RIGHT,   755, 195, 40, 34, "Right"},
+    {VK_UP,      665, 155, 36, 34, "Up"},
+    {VK_LEFT,    625, 195, 36, 34, "Left"},
+    {VK_DOWN,    665, 195, 36, 34, "Down"},
+    {VK_RIGHT,   705, 195, 36, 34, "Right"},
 
     /* Numpad */
-    {VK_NUMLOCK, 665, 240, 45, 34, "Num"},
-    {VK_DIVIDE,  715, 240, 40, 34, "/"},
-    {VK_MULTIPLY,760, 240, 40, 34, "*"},
-    {VK_SUBTRACT,665, 280, 40, 34, "-"},
-    {VK_NUMPAD7, 710, 280, 40, 34, "7"},
-    {VK_NUMPAD8, 755, 280, 40, 34, "8"},
-    {VK_NUMPAD9, 665, 320, 40, 34, "9"},
-    {VK_ADD,     710, 320, 40, 74, "+"},
-    {VK_NUMPAD4, 755, 320, 40, 34, "4"},
-    {VK_NUMPAD5, 710, 360, 40, 34, "5"},
-    {VK_NUMPAD1, 755, 360, 40, 34, "1"},
-    {VK_NUMPAD6, 665, 360, 40, 34, "6"},
-    {VK_NUMPAD2, 755, 400, 40, 34, "2"},
-    {VK_NUMPAD3, 665, 400, 40, 34, "3"},
-    {VK_NUMPAD0, 710, 400, 40, 34, "0"},
-    {VK_DECIMAL, 755, 400, 40, 34, "."},
+    {VK_NUMLOCK, 755, 240, 45, 34, "Num"},
+    {VK_DIVIDE,  805, 240, 35, 34, "/"},
+    {VK_MULTIPLY,845, 240, 35, 34, "*"},
+    {VK_SUBTRACT,755, 280, 35, 34, "-"},
+    {VK_NUMPAD7, 795, 280, 35, 34, "7"},
+    {VK_NUMPAD8, 835, 280, 35, 34, "8"},
+    {VK_NUMPAD9, 795, 320, 35, 34, "9"},
+    {VK_ADD,     835, 320, 35, 74, "+"},
+    {VK_NUMPAD4, 755, 320, 35, 34, "4"},
+    {VK_NUMPAD5, 795, 360, 35, 34, "5"},
+    {VK_NUMPAD1, 755, 360, 35, 34, "1"},
+    {VK_NUMPAD6, 835, 360, 35, 34, "6"},
+    {VK_NUMPAD2, 795, 400, 35, 34, "2"},
+    {VK_NUMPAD3, 835, 400, 35, 34, "3"},
+    {VK_NUMPAD0, 755, 400, 35, 34, "0"},
+    {VK_DECIMAL, 795, 400, 35, 34, "."},
 };
 
 #define HEAT_KEY_COUNT (sizeof(g_heatKeys) / sizeof(g_heatKeys[0]))
@@ -1047,7 +1048,7 @@ static LRESULT CALLBACK HeatmapWndProc(HWND hWnd, UINT msg,
         HWND hCombo = CreateWindow(WC_COMBOBOX, "",
                         WS_CHILD | WS_VISIBLE |
                         CBS_DROPDOWNLIST | WS_VSCROLL,
-                        10, 330, 200, 200,
+                        10, 340, 200, 200,
                         hWnd, (HMENU)IDC_HEATMAP_APP_COMBO,
                         g_hInst, NULL);
         SendMessage(hCombo, CB_ADDSTRING, 0,
@@ -1178,7 +1179,7 @@ static void show_heatmap(HWND hParent)
 
     HWND hDlg = CreateWindow("KSC_Heatmap", "KSC - Key Heatmap",
                  WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
-                 CW_USEDEFAULT, CW_USEDEFAULT, 810, 410,
+                 CW_USEDEFAULT, CW_USEDEFAULT, 900, 430,
                  hParent, NULL, g_hInst, NULL);
     ShowWindow(hDlg, SW_SHOW);
     UpdateWindow(hDlg);
