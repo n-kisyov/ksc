@@ -793,22 +793,23 @@ static const HeatKey g_heatKeys[] = {
     {VK_RIGHT,   780, 195, 36, 34, "Right"},
 
     /* Numpad */
-    {VK_NUMLOCK, 830,  50, 40, 34, "Num"},
-    {VK_DIVIDE,  875,  50, 35, 34, "/"},
-    {VK_MULTIPLY,915,  50, 35, 34, "*"},
-    {VK_SUBTRACT,830,  90, 40, 34, "-"},
-    {VK_NUMPAD7, 875,  90, 35, 34, "7"},
-    {VK_NUMPAD8, 915,  90, 35, 34, "8"},
-    {VK_ADD,     830, 130, 40, 74, "+"},
-    {VK_NUMPAD9, 875, 130, 35, 34, "9"},
-    {VK_NUMPAD4, 915, 130, 35, 34, "4"},
-    {VK_NUMPAD5, 875, 170, 35, 34, "5"},
-    {VK_NUMPAD6, 915, 170, 35, 34, "6"},
-    {VK_NUMPAD1, 875, 210, 35, 34, "1"},
-    {VK_NUMPAD2, 915, 210, 35, 34, "2"},
-    {VK_NUMPAD3, 875, 250, 35, 34, "3"},
-    {VK_NUMPAD0, 830, 250, 85, 34, "0"},
-    {VK_DECIMAL, 915, 250, 35, 34, "."},
+    {VK_NUMLOCK, 850,  50, 40, 34, "Num"},
+    {VK_DIVIDE,  895,  50, 35, 34, "/"},
+    {VK_MULTIPLY,935,  50, 35, 34, "*"},
+    {VK_SUBTRACT,975,  50, 35, 34, "-"},
+    {VK_NUMPAD7, 850,  90, 40, 34, "7"},
+    {VK_NUMPAD8, 895,  90, 35, 34, "8"},
+    {VK_NUMPAD9, 935,  90, 35, 34, "9"},
+    {VK_ADD,     975,  90, 35, 74, "+"},
+    {VK_NUMPAD4, 850, 130, 40, 34, "4"},
+    {VK_NUMPAD5, 895, 130, 35, 34, "5"},
+    {VK_NUMPAD6, 935, 130, 35, 34, "6"},
+    {VK_NUMPAD1, 850, 170, 40, 34, "1"},
+    {VK_NUMPAD2, 895, 170, 35, 34, "2"},
+    {VK_NUMPAD3, 935, 170, 35, 34, "3"},
+    {VK_RETURN,  975, 170, 35, 74, "Ent"},
+    {VK_NUMPAD0, 850, 210, 75, 34, "0"},
+    {VK_DECIMAL, 935, 210, 35, 34, "."},
 };
 
 #define HEAT_KEY_COUNT (sizeof(g_heatKeys) / sizeof(g_heatKeys[0]))
@@ -1148,7 +1149,7 @@ static void show_heatmap(HWND hParent)
 
     HWND hDlg = CreateWindow("KSC_Heatmap", "KSC - Key Heatmap",
                  WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
-                 CW_USEDEFAULT, CW_USEDEFAULT, 970, 400,
+                 CW_USEDEFAULT, CW_USEDEFAULT, 1050, 400,
                  hParent, NULL, g_hInst, NULL);
     ShowWindow(hDlg, SW_SHOW);
     UpdateWindow(hDlg);
