@@ -21,22 +21,31 @@ static HANDLE g_eventSignal = NULL;
 static HANDLE g_writerThread = NULL;
 static volatile BOOL g_writerRunning = FALSE;
 
+static void db_drain_events_locked(void)
+{
+    if (g_eventCount > 0 && g_db) {
+        sqlite3_exec(g_db, "BEGIN IMMEDIATE", NULL, NULL, NULL);
+        while (g_eventCount > 0) {
+            const KeyEvent *e = &g_eventBuf[g_eventRead];
+            db_increment_key(e->key_code, e->key_name, e->app);
+            g_eventRead = (g_eventRead + 1) % EVENT_BUF_SIZE;
+            g_eventCount--;
+        }
+        sqlite3_exec(g_db, "COMMIT", NULL, NULL, NULL);
+    }
+}
+
 static DWORD WINAPI db_writer_thread(LPVOID param)
 {
     (void)param;
-    while (g_writerRunning) {
+    for (;;) {
         WaitForSingleObject(g_eventSignal, 100);
 
         EnterCriticalSection(&g_eventCs);
-        if (g_eventCount > 0 && g_db) {
-            sqlite3_exec(g_db, "BEGIN IMMEDIATE", NULL, NULL, NULL);
-            while (g_eventCount > 0) {
-                const KeyEvent *e = &g_eventBuf[g_eventRead];
-                db_increment_key(e->key_code, e->key_name, e->app);
-                g_eventRead = (g_eventRead + 1) % EVENT_BUF_SIZE;
-                g_eventCount--;
-            }
-            sqlite3_exec(g_db, "COMMIT", NULL, NULL, NULL);
+        db_drain_events_locked();
+        if (!g_writerRunning && g_eventCount == 0) {
+            LeaveCriticalSection(&g_eventCs);
+            break;
         }
         LeaveCriticalSection(&g_eventCs);
     }
@@ -135,10 +144,7 @@ void db_close(void)
         g_writerRunning = FALSE;
         SetEvent(g_eventSignal);
         if (g_writerThread) {
-            DWORD wr = WaitForSingleObject(g_writerThread, 5000);
-            if (wr == WAIT_TIMEOUT) {
-                TerminateThread(g_writerThread, 0);
-            }
+            WaitForSingleObject(g_writerThread, INFINITE);
             CloseHandle(g_writerThread);
             g_writerThread = NULL;
         }
@@ -477,16 +483,7 @@ void db_flush_events(void)
 {
     if (!g_eventSignal) return;
     EnterCriticalSection(&g_eventCs);
-    if (g_eventCount > 0 && g_db) {
-        sqlite3_exec(g_db, "BEGIN IMMEDIATE", NULL, NULL, NULL);
-        while (g_eventCount > 0) {
-            const KeyEvent *e = &g_eventBuf[g_eventRead];
-            db_increment_key(e->key_code, e->key_name, e->app);
-            g_eventRead = (g_eventRead + 1) % EVENT_BUF_SIZE;
-            g_eventCount--;
-        }
-        sqlite3_exec(g_db, "COMMIT", NULL, NULL, NULL);
-    }
+    db_drain_events_locked();
     LeaveCriticalSection(&g_eventCs);
 }
 

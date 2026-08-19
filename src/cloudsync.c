@@ -39,6 +39,11 @@ extern int http_upload_file(const char *url, const char *bearer,
                              const char *folderId,
                              char **response, int *status);
 
+static int target_result(int configured, int attempted, int ok)
+{
+    return !configured || (attempted && ok);
+}
+
 /* ---- Token storage ---- */
 static void get_cloud_dir(char *buf, int bufsz)
 {
@@ -342,8 +347,9 @@ static DWORD WINAPI cloudsync_backup_thread(LPVOID param)
         sshOK = ok;
     }
 
-    /* delete local files only if an upload was attempted and succeeded */
-    if ((driveAttempted && driveOK) || (sshAttempted && sshOK)) {
+    /* Keep the local backup set unless every configured target succeeds. */
+    if (target_result(driveConfigured, driveAttempted, driveOK) &&
+        target_result(sshConfigured, sshAttempted, sshOK)) {
         for (int i = 0; i < nFiles; i++) {
             sprintf(localBak, "%s\\%s", dir, bakNames[i]);
             DeleteFile(localBak);
@@ -403,12 +409,22 @@ static DWORD WINAPI cloudsync_backup_thread(LPVOID param)
             WriteFile(hf, "[\r\n", 3, &w2, NULL);
             WriteFile(hf, entry, (DWORD)strlen(entry), &w2, NULL);
             if (existing && existing[0] == '[') {
-                char *start = strchr(existing + 1, '{');
-                if (start) {
+                char *start = existing + 1;
+                while (*start == '\r' || *start == '\n' ||
+                       *start == ' ' || *start == '\t') {
+                    start++;
+                }
+                char *end = strrchr(start, ']');
+                if (end) {
+                    while (end > start &&
+                           (end[-1] == '\r' || end[-1] == '\n' ||
+                            end[-1] == ' ' || end[-1] == '\t')) {
+                        end--;
+                    }
+                }
+                if (end && end > start) {
                     WriteFile(hf, ",\r\n", 3, &w2, NULL);
-                    WriteFile(hf, start,
-                              (DWORD)(existingSize - (start - existing)),
-                              &w2, NULL);
+                    WriteFile(hf, start, (DWORD)(end - start), &w2, NULL);
                 }
             }
             WriteFile(hf, "\r\n]\r\n", 5, &w2, NULL);
@@ -421,7 +437,9 @@ static DWORD WINAPI cloudsync_backup_thread(LPVOID param)
     {
         extern int db_get_setting_int(const char *k, int d);
         if (db_get_setting_int("tg_enabled", 0)) {
-            int allOK = (driveOK && sshOK);
+            int allOK =
+                target_result(driveConfigured, driveAttempted, driveOK) &&
+                target_result(sshConfigured, sshAttempted, sshOK);
             int mode = db_get_setting_int("tg_notify_mode", 0);
             if (mode == 0 || (mode == 1 && !allOK)) {
                 char msg[512];
@@ -762,8 +780,15 @@ void cloudsync_set_schedule(int value)
 void cloudsync_init(void)
 {
     if (load_token()) {
-        g_loggedIn = 1;
         /* attempt a token refresh to validate */
-        refresh_access_token();
+        if (refresh_access_token()) {
+            g_loggedIn = 1;
+        } else {
+            g_loggedIn = 0;
+            g_accessToken[0] = '\0';
+            g_refreshToken[0] = '\0';
+            g_userEmail[0] = '\0';
+            g_folderId[0] = '\0';
+        }
     }
 }
