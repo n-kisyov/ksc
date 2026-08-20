@@ -1,5 +1,29 @@
 $ErrorActionPreference = "Stop"
 
+$ucrtBin = "C:\msys64\ucrt64\bin"
+$ucrtGcc = Join-Path $ucrtBin "gcc.exe"
+$ucrtMake = Join-Path $ucrtBin "mingw32-make.exe"
+$ucrtWindres = Join-Path $ucrtBin "windres.exe"
+$ucrtGccCMake = $ucrtGcc -replace "\\", "/"
+$ucrtMakeCMake = $ucrtMake -replace "\\", "/"
+$ucrtWindresCMake = $ucrtWindres -replace "\\", "/"
+
+if (-not (Test-Path $ucrtGcc)) {
+    Write-Host "[ERROR] Expected MSYS2 UCRT64 GCC not found at $ucrtGcc"
+    Write-Host "Install the MSYS2 UCRT64 MinGW toolchain and try again."
+    exit 1
+}
+if (-not (Test-Path $ucrtMake)) {
+    Write-Host "[ERROR] Expected MSYS2 UCRT64 mingw32-make not found at $ucrtMake"
+    exit 1
+}
+if (-not (Test-Path $ucrtWindres)) {
+    Write-Host "[ERROR] Expected MSYS2 UCRT64 windres not found at $ucrtWindres"
+    exit 1
+}
+
+$env:PATH = "$ucrtBin;$env:PATH"
+
 Write-Host "============================================"
 Write-Host "  KSC - Keystroke Counter Build Script"
 Write-Host "============================================"
@@ -15,13 +39,8 @@ if (-not $cmake) {
 Write-Host "[OK] CMake found: $($cmake.Source)"
 
 # Check for GCC (MinGW)
-$gcc = Get-Command gcc -ErrorAction SilentlyContinue
-if (-not $gcc) {
-    Write-Host "[ERROR] GCC (MinGW-w64) is not installed or not in PATH."
-    Write-Host "Download from: https://www.mingw-w64.org/"
-    exit 1
-}
-Write-Host "[OK] GCC found: $($gcc.Source)"
+$gcc = Get-Item $ucrtGcc
+Write-Host "[OK] GCC found: $($gcc.FullName)"
 
 # Download SQLite3 amalgamation if not present
 $SQLiteYear = "2024"
@@ -126,8 +145,6 @@ if (-not (Test-Path "libssh2\libssh2.a")) {
 
     Push-Location $LsshBld
     try {
-        $env:PATH = $env:PATH -replace [regex]::Escape("C:\\Users\\nikolay\\Downloads\\w64devkit\\bin;"), ""
-        $env:PATH = "C:\msys64\ucrt64\bin;$env:PATH"
         & cmake $LsshSrc -G "MinGW Makefiles" `
             -DCRYPTO_BACKEND=OpenSSL `
             -DOPENSSL_ROOT_DIR=C:/msys64/ucrt64 `
@@ -139,7 +156,9 @@ if (-not (Test-Path "libssh2\libssh2.a")) {
             -DENABLE_MAC_NONE=OFF `
             -DCMAKE_POLICY_VERSION_MINIMUM="3.5" `
             -DCMAKE_BUILD_TYPE=Release `
-            -DCMAKE_C_COMPILER="$($gcc.Source)"
+            -DCMAKE_C_COMPILER="$ucrtGccCMake" `
+            -DCMAKE_RC_COMPILER="$ucrtWindresCMake" `
+            -DCMAKE_MAKE_PROGRAM="$ucrtMakeCMake"
         if ($LASTEXITCODE -ne 0) { throw "cmake failed" }
         & cmake --build . --config Release
         if ($LASTEXITCODE -ne 0) { throw "build failed" }
@@ -218,13 +237,13 @@ New-Item -ItemType Directory -Path "build" | Out-Null
 
 Push-Location "build"
 try {
-    $env:PATH = $env:PATH -replace [regex]::Escape("C:\\Users\\nikolay\\Downloads\\w64devkit\\bin;"), ""
-    $env:PATH = "C:\msys64\ucrt64\bin;$env:PATH"
     $cmakeArgs = @(
         "..",
         "-G", "MinGW Makefiles",
         "-DCMAKE_BUILD_TYPE=Release",
-        "-DCMAKE_C_COMPILER=$($gcc.Source)"
+        "-DCMAKE_C_COMPILER=$ucrtGccCMake",
+        "-DCMAKE_RC_COMPILER=$ucrtWindresCMake",
+        "-DCMAKE_MAKE_PROGRAM=$ucrtMakeCMake"
     )
     & cmake @cmakeArgs
     if ($LASTEXITCODE -ne 0) {
@@ -249,44 +268,54 @@ try {
 
 # Copy executable to project root
 if (Test-Path "build\ksc.exe") {
-    Copy-Item -Path "build\ksc.exe" -Destination "ksc.exe" -Force
-
-    # Self-sign the executable
-    Write-Host ""
-    Write-Host "[INFO] Signing executable..."
-    $certSubject = "CN=bbounce.org ksc 1.1"
-    $cert = Get-ChildItem -Path Cert:\CurrentUser\My -CodeSigningCert |
-            Where-Object { $_.Subject -eq $certSubject } |
-            Select-Object -First 1
-    if (-not $cert) {
-        try {
-            $cert = New-SelfSignedCertificate `
-                -Type CodeSigningCert `
-                -Subject $certSubject `
-                -KeyUsage DigitalSignature `
-                -CertStoreLocation Cert:\CurrentUser\My `
-                -FriendlyName "ksc Signing Certificate"
-            Write-Host "[OK] Created self-signed code-signing certificate."
-        } catch {
-            Write-Host "[WARN] Could not create signing certificate: $($_.Exception.Message)"
-            Write-Host "[WARN] Skipping signature."
-        }
+    $rootExeReady = $false
+    try {
+        Copy-Item -Path "build\ksc.exe" -Destination "ksc.exe" -Force
+        $rootExeReady = $true
+    } catch {
+        Write-Host ""
+        Write-Host "[WARN] Could not replace project-root ksc.exe: $($_.Exception.Message)"
+        Write-Host "[WARN] Fresh build is available at build\ksc.exe"
     }
-    if ($cert) {
-        try {
-            Set-AuthenticodeSignature -FilePath "ksc.exe" -Certificate $cert -TimestampServer "http://timestamp.digicert.com" | Out-Null
-            Write-Host "[OK] Executable signed."
 
-            $certFile = Join-Path $PSScriptRoot "ksc.cer"
-            Export-Certificate -Cert $cert -FilePath $certFile -Type CERT -Force | Out-Null
-            Write-Host "[INFO] Public certificate exported to ksc.cer"
-            Write-Host ""
-            Write-Host "  To permanently trust this build, run once (as Admin):"
-            Write-Host "    Import-Certificate -FilePath .\ksc.cer -CertStoreLocation Cert:\CurrentUser\TrustedPublisher"
-            Write-Host ""
-        } catch {
-            Write-Host "[WARN] Signing failed: $($_.Exception.Message)"
-            Write-Host "[WARN] The exe is unsigned. Right-click Properties > Unblock to run."
+    if ($rootExeReady) {
+        # Self-sign the executable
+        Write-Host ""
+        Write-Host "[INFO] Signing executable..."
+        $certSubject = "CN=bbounce.org ksc 1.1"
+        $cert = Get-ChildItem -Path Cert:\CurrentUser\My -CodeSigningCert |
+                Where-Object { $_.Subject -eq $certSubject } |
+                Select-Object -First 1
+        if (-not $cert) {
+            try {
+                $cert = New-SelfSignedCertificate `
+                    -Type CodeSigningCert `
+                    -Subject $certSubject `
+                    -KeyUsage DigitalSignature `
+                    -CertStoreLocation Cert:\CurrentUser\My `
+                    -FriendlyName "ksc Signing Certificate"
+                Write-Host "[OK] Created self-signed code-signing certificate."
+            } catch {
+                Write-Host "[WARN] Could not create signing certificate: $($_.Exception.Message)"
+                Write-Host "[WARN] Skipping signature."
+            }
+        }
+        if ($cert) {
+            try {
+                Set-AuthenticodeSignature -FilePath "ksc.exe" -Certificate $cert -TimestampServer "http://timestamp.digicert.com" | Out-Null
+                Write-Host "[OK] Executable signed."
+
+                $certFile = Join-Path $PSScriptRoot "ksc.cer"
+                Export-Certificate -Cert $cert -FilePath $certFile -Type CERT -Force | Out-Null
+                Write-Host "[INFO] Public certificate exported to ksc.cer"
+                Write-Host ""
+                Write-Host "  To permanently trust this build, run once (as Admin):"
+                Write-Host "    Import-Certificate -FilePath .\ksc.cer -CertStoreLocation Cert:\CurrentUser\TrustedPublisher"
+                Write-Host ""
+            } catch {
+                Write-Host "[WARN] Signing failed: $($_.Exception.Message)"
+                Write-Host "[WARN] The exe is unsigned. Right-click Properties > Unblock to run."
+            }
         }
     }
 
@@ -299,7 +328,11 @@ if (Test-Path "build\ksc.exe") {
     Write-Host ""
     Write-Host "============================================"
     Write-Host "  Build successful!"
-    Write-Host "  ksc.exe is ready in the project root."
+    if ($rootExeReady) {
+        Write-Host "  ksc.exe is ready in the project root."
+    } else {
+        Write-Host "  Fresh binary is ready at build\ksc.exe."
+    }
     Write-Host "  Source lines:  $srcLines (app) + $sqlLines (sqlite3)"
     Write-Host "============================================"
 } else {
