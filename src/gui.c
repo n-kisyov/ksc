@@ -169,6 +169,9 @@ static BOOL CALLBACK EnumThemeWindowsProc(HWND hwnd, LPARAM lParam)
 static void handle_theme_changed(HWND hWnd)
 {
     BOOL dark = db_get_setting_int("dark_mode", 0);
+    if (g_pSetPreferredAppMode) {
+        g_pSetPreferredAppMode(dark ? 2 : 3);
+    }
     BOOL useDark = dark ? TRUE : FALSE;
     DwmSetWindowAttribute(hWnd, DWMWA_USE_IMMERSIVE_DARK_MODE,
                           &useDark, sizeof(useDark));
@@ -183,6 +186,9 @@ static void handle_theme_changed(HWND hWnd)
 static void update_theme(HWND hWnd)
 {
     g_dark_mode = db_get_setting_int("dark_mode", 0);
+    if (g_pSetPreferredAppMode) {
+        g_pSetPreferredAppMode(g_dark_mode ? 2 : 3);
+    }
 
     if (g_hDarkBrush) { DeleteObject(g_hDarkBrush); g_hDarkBrush = NULL; }
     if (g_hLvBrush)   { DeleteObject(g_hLvBrush);   g_hLvBrush = NULL;   }
