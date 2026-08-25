@@ -202,9 +202,10 @@ static void update_theme(HWND hWnd)
         HMENU hMenu = GetMenu(hWnd);
         if (hMenu) {
             MENUINFO mi = { sizeof(mi) };
-            mi.fMask = MIM_BACKGROUND;
+            mi.fMask = MIM_BACKGROUND | MIM_APPLYTOSUBMENUS;
             mi.hbrBack = g_hDarkBrush;
             SetMenuInfo(hMenu, &mi);
+            DrawMenuBar(hWnd);
         }
 
         if (g_hListView) {
@@ -231,9 +232,10 @@ static void update_theme(HWND hWnd)
         HMENU hMenu = GetMenu(hWnd);
         if (hMenu) {
             MENUINFO mi = { sizeof(mi) };
-            mi.fMask = MIM_BACKGROUND;
-            mi.hbrBack = GetSysColorBrush(COLOR_MENUBAR);
+            mi.fMask = MIM_BACKGROUND | MIM_APPLYTOSUBMENUS;
+            mi.hbrBack = NULL;
             SetMenuInfo(hMenu, &mi);
+            DrawMenuBar(hWnd);
         }
 
         if (g_hListView) {
