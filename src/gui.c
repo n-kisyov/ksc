@@ -158,6 +158,28 @@ static void refresh_list_view(void)
     InvalidateRect(g_hListView, NULL, TRUE);
 }
 
+static BOOL CALLBACK EnumThemeWindowsProc(HWND hwnd, LPARAM lParam)
+{
+    if (hwnd != (HWND)lParam) {
+        PostMessage(hwnd, WM_THEME_CHANGED, 0, 0);
+    }
+    return TRUE;
+}
+
+static void handle_theme_changed(HWND hWnd)
+{
+    BOOL dark = db_get_setting_int("dark_mode", 0);
+    BOOL useDark = dark ? TRUE : FALSE;
+    DwmSetWindowAttribute(hWnd, DWMWA_USE_IMMERSIVE_DARK_MODE,
+                          &useDark, sizeof(useDark));
+    if (g_pAllowDarkModeForWindow)
+        g_pAllowDarkModeForWindow(hWnd, useDark);
+    SetWindowPos(hWnd, NULL, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
+                 SWP_NOACTIVATE | SWP_FRAMECHANGED);
+    InvalidateRect(hWnd, NULL, TRUE);
+}
+
 static void update_theme(HWND hWnd)
 {
     g_dark_mode = db_get_setting_int("dark_mode", 0);
@@ -656,6 +678,10 @@ static LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg,
         }
         break;
 
+    case WM_THEME_CHANGED:
+        handle_theme_changed(hWnd);
+        return 0;
+
     case WM_CLOSE:
         DestroyWindow(hWnd);
         return 0;
@@ -1044,6 +1070,18 @@ static LRESULT CALLBACK HeatmapWndProc(HWND hWnd, UINT msg,
         return 0;
     case WM_ERASEBKGND:
         return TRUE;
+    case WM_CTLCOLORBTN:
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLORLISTBOX: {
+        BOOL dark = db_get_setting_int("dark_mode", 0);
+        if (dark && g_hDarkBrush) {
+            HDC hdc = (HDC)wParam;
+            SetBkMode(hdc, TRANSPARENT);
+            SetTextColor(hdc, RGB(230, 230, 230));
+            return (LRESULT)g_hDarkBrush;
+        }
+        return DefWindowProc(hWnd, msg, wParam, lParam);
+    }
     case WM_PAINT: {
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hWnd, &ps);
@@ -1127,6 +1165,10 @@ static LRESULT CALLBACK HeatmapWndProc(HWND hWnd, UINT msg,
             InvalidateRect(hWnd, NULL, TRUE);
         }
         return 0;
+    case WM_THEME_CHANGED:
+        handle_theme_changed(hWnd);
+        return 0;
+
     case WM_CLOSE:
         KillTimer(hWnd, ID_TIMER_REFRESH);
         DestroyWindow(hWnd);
@@ -1563,6 +1605,10 @@ static LRESULT CALLBACK StatsWndProc(HWND hWnd, UINT msg,
         }
         return 0;
 
+    case WM_THEME_CHANGED:
+        handle_theme_changed(hWnd);
+        return 0;
+
     case WM_CLOSE:
         KillTimer(hWnd, ID_TIMER_REFRESH);
         DestroyWindow(hWnd);
@@ -1923,6 +1969,10 @@ static LRESULT CALLBACK ViewLogsWndProc(HWND hWnd, UINT msg,
                 hWnd, GWLP_USERDATA);
             refresh_logs_list(d);
         }
+        return 0;
+
+    case WM_THEME_CHANGED:
+        handle_theme_changed(hWnd);
         return 0;
 
     case WM_CLOSE:
@@ -2444,6 +2494,10 @@ static LRESULT CALLBACK MouseClickerWndProc(HWND hWnd, UINT msg,
         break;
     }
 
+    case WM_THEME_CHANGED:
+        handle_theme_changed(hWnd);
+        return 0;
+
     case WM_CLOSE: {
         int intervalMs = GetDlgItemInt(hWnd,
             IDC_CLICK_INTERVAL_MIN, NULL, FALSE) * 60000
@@ -2892,6 +2946,10 @@ static LRESULT CALLBACK CloudBackupWndProc(HWND hWnd, UINT msg,
         }
         return 0;
     }
+
+    case WM_THEME_CHANGED:
+        handle_theme_changed(hWnd);
+        return 0;
 
     case WM_CLOSE:
         DestroyWindow(hWnd);
@@ -3614,6 +3672,10 @@ static LRESULT CALLBACK KeyboardSimWndProc(HWND hWnd, UINT msg,
         break;
     }
 
+    case WM_THEME_CHANGED:
+        handle_theme_changed(hWnd);
+        return 0;
+
     case WM_CLOSE: {
         int ims = GetDlgItemInt(hWnd, IDC_KBSIM_INT_MIN,
             NULL, FALSE) * 60000
@@ -3825,6 +3887,7 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg,
     case WM_THEME_CHANGED:
         update_theme(hWnd);
         update_auto_refresh(hWnd);
+        EnumThreadWindows(GetCurrentThreadId(), EnumThemeWindowsProc, (LPARAM)hWnd);
         return 0;
 
     case WM_TRAYICON:
