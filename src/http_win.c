@@ -40,7 +40,7 @@ static int http_do(const wchar_t *verb, const wchar_t *fullUrl,
 
     if (bearer && bearer[0]) {
         char hdr[1024];
-        sprintf(hdr, "Bearer %s", bearer);
+        sprintf(hdr, "Authorization: Bearer %s\r\n", bearer);
         wchar_t whdr[1024];
         MultiByteToWideChar(CP_UTF8, 0, hdr, -1, whdr, 1024);
         WinHttpAddRequestHeaders(hRequest, whdr, -1,
@@ -135,10 +135,10 @@ int http_post_form(const char *url, const char *bearer,
     if (bearer && bearer[0])
         swprintf(whdr, 2048,
             L"Content-Type: application/x-www-form-urlencoded\r\n"
-            L"Authorization: Bearer %S", bearer);
+            L"Authorization: Bearer %S\r\n", bearer);
     else
         wcscpy(whdr,
-            L"Content-Type: application/x-www-form-urlencoded");
+            L"Content-Type: application/x-www-form-urlencoded\r\n");
     WinHttpAddRequestHeaders(hRequest, whdr, -1,
         WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
 
@@ -216,7 +216,7 @@ int http_post_json(const char *url, const char *bearer,
 
     wchar_t whdr[2048];
     swprintf(whdr, 2048,
-        L"Content-Type: application/json\r\nAuthorization: Bearer %S",
+        L"Content-Type: application/json\r\nAuthorization: Bearer %S\r\n",
         bearer ? bearer : "");
     WinHttpAddRequestHeaders(hRequest, whdr, -1,
         WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
@@ -335,7 +335,7 @@ int http_upload_file(const char *url, const char *bearer,
     wchar_t whdr[4096];
     swprintf(whdr, 4096,
         L"Content-Type: multipart/related; boundary=%S\r\n"
-        L"Authorization: Bearer %S",
+        L"Authorization: Bearer %S\r\n",
         boundary, bearer ? bearer : "");
     WinHttpAddRequestHeaders(hRequest, whdr, -1,
         WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
