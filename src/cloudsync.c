@@ -180,12 +180,40 @@ static void load_folder_id(void)
 
 static int ensure_ksc_folder(void)
 {
-    /* cached in memory */
-    if (g_folderId[0]) return 1;
-
     /* load from disk */
-    load_folder_id();
-    if (g_folderId[0]) return 1;
+    if (!g_folderId[0]) {
+        load_folder_id();
+    }
+
+    if (g_folderId[0]) {
+        /* Verify folder still exists on Drive */
+        char url[1024];
+        sprintf(url, "%s/files/%s?fields=id,trashed", GOOGLE_DRIVE_API, g_folderId);
+        char *resp = NULL;
+        int status = 0;
+        http_get_json(url, g_accessToken, &resp, &status);
+
+        int valid = 0;
+        if (resp && status == 200) {
+            if (!strstr(resp, "\"trashed\": true") && !strstr(resp, "\"trashed\":true")) {
+                valid = 1;
+            }
+        }
+        free(resp);
+
+        if (valid) {
+            return 1;
+        }
+
+        if (status == 404 || status == 200) {
+            /* Folder is deleted or trashed, clear the cache */
+            g_folderId[0] = '\0';
+            save_folder_id();
+        } else {
+            /* Transient network error, assume folder is valid and let upload attempt it */
+            return 1;
+        }
+    }
 
     /* search Drive */
     char url[1024];
