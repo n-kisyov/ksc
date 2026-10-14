@@ -38,7 +38,7 @@
 #define WM_TRAYICON      (WM_APP + 1)
 #define WM_THEME_CHANGED (WM_APP + 2)
 
-#define TRAY_ID 1
+constexpr int TRAY_ID = 1;
 
 #define IDM_SHOW               1001
 #define IDM_SETTINGS           1002
@@ -131,16 +131,16 @@
 #define IDC_TELEGRAM_TEST        2075
 #define IDC_TELEGRAM_SAVE        2076
 
-#define HOTKEY_ID_START_CLICK 100
-#define HOTKEY_ID_STOP_CLICK  101
-#define HOTKEY_ID_SHOW_KSC    102
-#define HOTKEY_ID_START_KBSIM 103
-#define HOTKEY_ID_STOP_KBSIM  104
+constexpr int HOTKEY_ID_START_CLICK = 100;
+constexpr int HOTKEY_ID_STOP_CLICK  = 101;
+constexpr int HOTKEY_ID_SHOW_KSC    = 102;
+constexpr int HOTKEY_ID_START_KBSIM = 103;
+constexpr int HOTKEY_ID_STOP_KBSIM  = 104;
 #define WM_CLICKER_CMD        (WM_APP + 5)
 #define WM_CLOUD_SYNC          (WM_APP + 6)
 #define WM_KBSIM_CMD           (WM_APP + 7)
 
-#define ID_TIMER_REFRESH 1
-#define ID_TIMER_CLOUD_SYNC 2
+constexpr int ID_TIMER_REFRESH    = 1;
+constexpr int ID_TIMER_CLOUD_SYNC = 2;
 
 #endif
