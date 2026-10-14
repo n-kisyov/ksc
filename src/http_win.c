@@ -5,12 +5,12 @@ static int http_do(const wchar_t *verb, const wchar_t *fullUrl,
                     const char *bearer, const char *body,
                     char **outResponse, int *outStatus)
 {
-    *outResponse = NULL;
+    *outResponse = nullptr;
     *outStatus = 0;
 
-    URL_COMPONENTS uc = {0};
+    URL_COMPONENTS uc = {};
     uc.dwStructSize = sizeof(uc);
-    wchar_t host[256] = {0}, path[2048] = {0}, extra[4096] = {0};
+    wchar_t host[256] = {}, path[2048] = {}, extra[4096] = {};
     uc.lpszHostName = host;
     uc.dwHostNameLength = 255;
     uc.lpszUrlPath = path;
@@ -35,7 +35,7 @@ static int http_do(const wchar_t *verb, const wchar_t *fullUrl,
     DWORD flags = (uc.nScheme == INTERNET_SCHEME_HTTPS)
                   ? WINHTTP_FLAG_SECURE : 0;
     HINTERNET hRequest = WinHttpOpenRequest(hConnect, verb, fullPath,
-        NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, flags);
+        nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, flags);
     if (!hRequest) { WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return 0; }
 
     if (bearer && bearer[0]) {
@@ -55,7 +55,7 @@ static int http_do(const wchar_t *verb, const wchar_t *fullUrl,
         WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect);
         WinHttpCloseHandle(hSession); return 0;
     }
-    if (!WinHttpReceiveResponse(hRequest, NULL)) {
+    if (!WinHttpReceiveResponse(hRequest, nullptr)) {
         WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect);
         WinHttpCloseHandle(hSession); return 0;
     }
@@ -68,7 +68,7 @@ static int http_do(const wchar_t *verb, const wchar_t *fullUrl,
     *outStatus = (int)status;
 
     DWORD total = 0;
-    char *buf = NULL;
+    char *buf = nullptr;
     DWORD available = 0;
     while (WinHttpQueryDataAvailable(hRequest, &available) && available > 0) {
         char *tmp = realloc(buf, total + available + 1);
@@ -93,7 +93,7 @@ int http_get_json(const char *url, const char *bearer,
 {
     wchar_t wurl[2048];
     MultiByteToWideChar(CP_UTF8, 0, url, -1, wurl, 2048);
-    return http_do(L"GET", wurl, bearer, NULL, response, status);
+    return http_do(L"GET", wurl, bearer, nullptr, response, status);
 }
 
 int http_post_form(const char *url, const char *bearer,
@@ -102,9 +102,9 @@ int http_post_form(const char *url, const char *bearer,
     wchar_t wurl[2048];
     MultiByteToWideChar(CP_UTF8, 0, url, -1, wurl, 2048);
 
-    URL_COMPONENTS uc = {0};
+    URL_COMPONENTS uc = {};
     uc.dwStructSize = sizeof(uc);
-    wchar_t host[256] = {0}, pth[2048] = {0}, xtra[4096] = {0};
+    wchar_t host[256] = {}, pth[2048] = {}, xtra[4096] = {};
     uc.lpszHostName = host;
     uc.dwHostNameLength = 255;
     uc.lpszUrlPath = pth;
@@ -126,7 +126,7 @@ int http_post_form(const char *url, const char *bearer,
     if (!hConnect) { WinHttpCloseHandle(hSession); return 0; }
 
     HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"POST", fullPath,
-        NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+        nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
         WINHTTP_FLAG_SECURE);
     if (!hRequest) { WinHttpCloseHandle(hConnect);
         WinHttpCloseHandle(hSession); return 0; }
@@ -148,7 +148,7 @@ int http_post_form(const char *url, const char *bearer,
         WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect);
         WinHttpCloseHandle(hSession); return 0;
     }
-    if (!WinHttpReceiveResponse(hRequest, NULL)) {
+    if (!WinHttpReceiveResponse(hRequest, nullptr)) {
         WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect);
         WinHttpCloseHandle(hSession); return 0;
     }
@@ -161,7 +161,7 @@ int http_post_form(const char *url, const char *bearer,
     *status = (int)httpStatus;
 
     DWORD total = 0;
-    char *buf = NULL;
+    char *buf = nullptr;
     DWORD available = 0;
     while (WinHttpQueryDataAvailable(hRequest, &available) && available > 0) {
         char *tmp = realloc(buf, total + available + 1);
@@ -186,9 +186,9 @@ int http_post_json(const char *url, const char *bearer,
     wchar_t wurl[2048];
     MultiByteToWideChar(CP_UTF8, 0, url, -1, wurl, 2048);
 
-    URL_COMPONENTS uc = {0};
+    URL_COMPONENTS uc = {};
     uc.dwStructSize = sizeof(uc);
-    wchar_t host[256] = {0}, pth[2048] = {0}, xtra[4096] = {0};
+    wchar_t host[256] = {}, pth[2048] = {}, xtra[4096] = {};
     uc.lpszHostName = host;
     uc.dwHostNameLength = 255;
     uc.lpszUrlPath = pth;
@@ -210,7 +210,7 @@ int http_post_json(const char *url, const char *bearer,
     if (!hConnect) { WinHttpCloseHandle(hSession); return 0; }
 
     HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"POST", fullPath,
-        NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+        nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
         WINHTTP_FLAG_SECURE);
     if (!hRequest) { WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return 0; }
 
@@ -227,7 +227,7 @@ int http_post_json(const char *url, const char *bearer,
         WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect);
         WinHttpCloseHandle(hSession); return 0;
     }
-    if (!WinHttpReceiveResponse(hRequest, NULL)) {
+    if (!WinHttpReceiveResponse(hRequest, nullptr)) {
         WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect);
         WinHttpCloseHandle(hSession); return 0;
     }
@@ -240,7 +240,7 @@ int http_post_json(const char *url, const char *bearer,
     *status = (int)httpStatus;
 
     DWORD total = 0;
-    char *buf = NULL;
+    char *buf = nullptr;
     DWORD available = 0;
     while (WinHttpQueryDataAvailable(hRequest, &available) && available > 0) {
         char *tmp = realloc(buf, total + available + 1);
@@ -265,14 +265,14 @@ int http_upload_file(const char *url, const char *bearer,
                       char **response, int *status)
 {
     HANDLE hFile = CreateFile(filePath, GENERIC_READ, FILE_SHARE_READ,
-        NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (hFile == INVALID_HANDLE_VALUE) return 0;
 
-    DWORD fileSize = GetFileSize(hFile, NULL);
+    DWORD fileSize = GetFileSize(hFile, nullptr);
     char *fileData = malloc(fileSize);
     if (!fileData) { CloseHandle(hFile); return 0; }
     DWORD read = 0;
-    ReadFile(hFile, fileData, fileSize, &read, NULL);
+    ReadFile(hFile, fileData, fileSize, &read, nullptr);
     CloseHandle(hFile);
 
     char meta[512];
@@ -303,9 +303,9 @@ int http_upload_file(const char *url, const char *bearer,
     wchar_t wurl[2048];
     MultiByteToWideChar(CP_UTF8, 0, url, -1, wurl, 2048);
 
-    URL_COMPONENTS uc = {0};
+    URL_COMPONENTS uc = {};
     uc.dwStructSize = sizeof(uc);
-    wchar_t host[256] = {0}, pth[2048] = {0}, xtra[4096] = {0};
+    wchar_t host[256] = {}, pth[2048] = {}, xtra[4096] = {};
     uc.lpszHostName = host;
     uc.dwHostNameLength = 255;
     uc.lpszUrlPath = pth;
@@ -327,7 +327,7 @@ int http_upload_file(const char *url, const char *bearer,
     if (!hConnect) { free(body); WinHttpCloseHandle(hSession); return 0; }
 
     HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"POST", fullPath,
-        NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+        nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
         WINHTTP_FLAG_SECURE);
     if (!hRequest) { free(body); WinHttpCloseHandle(hConnect);
         WinHttpCloseHandle(hSession); return 0; }
@@ -345,7 +345,7 @@ int http_upload_file(const char *url, const char *bearer,
         free(body); WinHttpCloseHandle(hRequest);
         WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return 0;
     }
-    if (!WinHttpReceiveResponse(hRequest, NULL)) {
+    if (!WinHttpReceiveResponse(hRequest, nullptr)) {
         free(body); WinHttpCloseHandle(hRequest);
         WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return 0;
     }
@@ -358,7 +358,7 @@ int http_upload_file(const char *url, const char *bearer,
     *status = (int)st;
 
     DWORD total = 0;
-    char *rbuf = NULL;
+    char *rbuf = nullptr;
     DWORD avail = 0;
     while (WinHttpQueryDataAvailable(hRequest, &avail) && avail > 0) {
         char *tmp = realloc(rbuf, total + avail + 1);
