@@ -10,15 +10,15 @@ typedef struct {
     int64_t count;
 } KeyStat;
 
-int db_init(void);
+[[nodiscard]] int db_init(void);
 void db_close(void);
 void db_increment_key(int key_code, const char *key_name, const char *app);
-int db_get_stats(KeyStat **out_stats);
-int db_get_date_range_stats(const char *from, const char *to,
+[[nodiscard]] int db_get_stats(KeyStat **out_stats);
+[[nodiscard]] int db_get_date_range_stats(const char *from, const char *to,
                              const char *app, int detailed,
                              KeyStat **out_stats);
 void db_free_stats(KeyStat *stats);
-int db_get_distinct_apps(char ***out_apps, int *out_count);
+[[nodiscard]] int db_get_distinct_apps(char ***out_apps, int *out_count);
 void db_free_apps(char **apps, int count);
 
 int  db_get_setting_int(const char *key, int default_val);
@@ -29,8 +29,8 @@ void db_set_setting_str(const char *key, const char *value);
 void db_queue_event(int key_code, const char *key_name, const char *app);
 void db_flush_events(void);
 void db_reset_stats(void);
-int64_t db_get_today_count(void);
+[[nodiscard]] int64_t db_get_today_count(void);
 void db_get_db_dir(char *buf, int bufsize);
-int  db_backup_safe(const char *destPath);
+[[nodiscard]] int  db_backup_safe(const char *destPath);
 
 #endif
