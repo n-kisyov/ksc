@@ -11,7 +11,7 @@ typedef struct {
     char app[256];
 } KeylogEntry;
 
-[[nodiscard]] int  keylog_open(void);
+int  keylog_open(void);
 void keylog_close(void);
 void keylog_insert(const char *key_name, int vk_code, const char *app);
 [[nodiscard]] int  keylog_query(const char *from, const char *to, const char *app,
