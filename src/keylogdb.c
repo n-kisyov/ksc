@@ -2,7 +2,7 @@
 #include "ksc_private.h"
 #include "sqlite3.h"
 
-static sqlite3 *g_klogDb = NULL;
+static sqlite3 *g_klogDb = nullptr;
 
 #define KLOG_BUF_SIZE 256
 
@@ -17,27 +17,26 @@ static int g_klogCount = 0;
 static int g_klogWrite = 0;
 static int g_klogRead  = 0;
 static CRITICAL_SECTION g_klogCs;
-static HANDLE g_klogSignal = NULL;
-static HANDLE g_klogThread = NULL;
-static volatile BOOL g_klogRunning = FALSE;
+static HANDLE g_klogSignal = nullptr;
+static HANDLE g_klogThread = nullptr;
+static volatile bool g_klogRunning = false;
 
 static void keylog_drain_events_locked(void)
 {
     if (g_klogCount > 0 && g_klogDb) {
-        sqlite3_exec(g_klogDb, "BEGIN IMMEDIATE", NULL, NULL, NULL);
+        sqlite3_exec(g_klogDb, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr);
         while (g_klogCount > 0) {
             const KlogEvent *e = &g_klogBuf[g_klogRead];
             keylog_insert(e->key_name, e->vk_code, e->app);
             g_klogRead = (g_klogRead + 1) % KLOG_BUF_SIZE;
             g_klogCount--;
         }
-        sqlite3_exec(g_klogDb, "COMMIT", NULL, NULL, NULL);
+        sqlite3_exec(g_klogDb, "COMMIT", nullptr, nullptr, nullptr);
     }
 }
 
-static DWORD WINAPI klog_writer_thread(LPVOID param)
+static DWORD WINAPI klog_writer_thread([[maybe_unused]] LPVOID param)
 {
-    (void)param;
     for (;;) {
         WaitForSingleObject(g_klogSignal, 100);
         EnterCriticalSection(&g_klogCs);
@@ -69,7 +68,7 @@ int keylog_open(void)
 
     int rc = sqlite3_open_v2(dbpath, &g_klogDb,
         SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX,
-        NULL);
+        nullptr);
     if (rc != SQLITE_OK) return 0;
 
     const char *sql =
@@ -84,22 +83,22 @@ int keylog_open(void)
         "CREATE INDEX IF NOT EXISTS idx_keylog_ts "
         "ON keylog(timestamp);";
 
-    char *err = NULL;
-    rc = sqlite3_exec(g_klogDb, sql, NULL, NULL, &err);
+    char *err = nullptr;
+    rc = sqlite3_exec(g_klogDb, sql, nullptr, nullptr, &err);
     if (rc != SQLITE_OK) {
         sqlite3_free(err);
         sqlite3_close(g_klogDb);
-        g_klogDb = NULL;
+        g_klogDb = nullptr;
         return 0;
     }
 
-    sqlite3_exec(g_klogDb, "PRAGMA journal_mode=WAL;", NULL, NULL, NULL);
+    sqlite3_exec(g_klogDb, "PRAGMA journal_mode=WAL;", nullptr, nullptr, nullptr);
 
     InitializeCriticalSection(&g_klogCs);
-    g_klogSignal = CreateEvent(NULL, FALSE, FALSE, NULL);
-    g_klogRunning = TRUE;
-    g_klogThread = CreateThread(NULL, 0, klog_writer_thread,
-                                 NULL, 0, NULL);
+    g_klogSignal = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+    g_klogRunning = true;
+    g_klogThread = CreateThread(nullptr, 0, klog_writer_thread,
+                                 nullptr, 0, nullptr);
 
     return 1;
 }
@@ -107,23 +106,23 @@ int keylog_open(void)
 void keylog_close(void)
 {
     if (g_klogRunning) {
-        g_klogRunning = FALSE;
+        g_klogRunning = false;
         SetEvent(g_klogSignal);
         if (g_klogThread) {
             WaitForSingleObject(g_klogThread, INFINITE);
             CloseHandle(g_klogThread);
-            g_klogThread = NULL;
+            g_klogThread = nullptr;
         }
     }
     if (g_klogSignal) {
         CloseHandle(g_klogSignal);
-        g_klogSignal = NULL;
+        g_klogSignal = nullptr;
     }
     DeleteCriticalSection(&g_klogCs);
 
     if (g_klogDb) {
         sqlite3_close(g_klogDb);
-        g_klogDb = NULL;
+        g_klogDb = nullptr;
     }
 }
 
@@ -142,8 +141,8 @@ void keylog_insert(const char *key_name, int vk_code, const char *app)
         "INSERT INTO keylog (timestamp, key_name, vk_code, app) "
         "VALUES (?1, ?2, ?3, ?4);";
 
-    sqlite3_stmt *stmt = NULL;
-    if (sqlite3_prepare_v2(g_klogDb, sql, -1, &stmt, NULL) != SQLITE_OK)
+    sqlite3_stmt *stmt = nullptr;
+    if (sqlite3_prepare_v2(g_klogDb, sql, -1, &stmt, nullptr) != SQLITE_OK)
         return;
 
     sqlite3_bind_text(stmt, 1, ts, -1, SQLITE_STATIC);
@@ -167,8 +166,8 @@ int keylog_query(const char *from, const char *to, const char *app,
         "AND (?3 = '' OR app = ?3) "
         "ORDER BY timestamp DESC;";
 
-    sqlite3_stmt *stmt = NULL;
-    if (sqlite3_prepare_v2(g_klogDb, sql, -1, &stmt, NULL) != SQLITE_OK)
+    sqlite3_stmt *stmt = nullptr;
+    if (sqlite3_prepare_v2(g_klogDb, sql, -1, &stmt, nullptr) != SQLITE_OK)
         return 0;
 
     sqlite3_bind_text(stmt, 1, from, -1, SQLITE_STATIC);
@@ -213,8 +212,8 @@ int keylog_get_apps(char ***out_apps, int *out_count)
 
     const char *sql =
         "SELECT DISTINCT app FROM keylog WHERE app != '' ORDER BY app ASC;";
-    sqlite3_stmt *stmt = NULL;
-    if (sqlite3_prepare_v2(g_klogDb, sql, -1, &stmt, NULL) != SQLITE_OK)
+    sqlite3_stmt *stmt = nullptr;
+    if (sqlite3_prepare_v2(g_klogDb, sql, -1, &stmt, nullptr) != SQLITE_OK)
         return 0;
 
     int cap = 16, cnt = 0;
@@ -232,7 +231,7 @@ int keylog_get_apps(char ***out_apps, int *out_count)
             apps = tmp;
         }
         const char *name = (const char *)sqlite3_column_text(stmt, 0);
-        apps[cnt] = name ? _strdup(name) : NULL;
+        apps[cnt] = name ? _strdup(name) : nullptr;
         cnt++;
     }
     sqlite3_finalize(stmt);
@@ -261,9 +260,9 @@ void keylog_delete_db(void)
     DeleteFile(dbpath);
 }
 
-int keylog_is_open(void)
+bool keylog_is_open(void)
 {
-    return g_klogDb != NULL;
+    return g_klogDb != nullptr;
 }
 
 void keylog_queue_event(const char *key_name, int vk_code,
