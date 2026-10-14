@@ -1,7 +1,7 @@
 #ifndef STARTUP_H
 #define STARTUP_H
 
-int startup_is_enabled(void);
-int startup_set_enabled(int enable);
+[[nodiscard]] bool startup_is_enabled(void);
+bool startup_set_enabled(bool enable);
 
 #endif
