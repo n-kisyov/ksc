@@ -1,6 +1,6 @@
 # ⌨️ ksc — Keystroke Counter
 
-**v1.1** — A lightweight Windows desktop app in modern C (~6.5k LOC) that tracks every keystroke, maps keyboard heatmaps, simulates input, records to a keylogger, and syncs encrypted backups to Google Drive and SSH with Telegram notifications.
+**v1.1** — A lightweight Windows desktop app in modern C that tracks every keystroke, maps keyboard heatmaps, simulates input, records to a keylogger, and syncs encrypted backups to Google Drive and SSH with Telegram notifications.
 
 <p align="center">
   <img src="screenshots/main-window-dark.png" width="400" alt="Main Window Dark">
