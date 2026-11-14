@@ -29,6 +29,7 @@ set(SOURCES
     src/gui.c
     src/tray.c
     src/startup.c
+    src/zip_util.c
     src/ksc.rc
 )
 
@@ -43,6 +44,7 @@ target_link_libraries(ksc PRIVATE
     "${CMAKE_SOURCE_DIR}/libssh2/libssh2.a"
     ssl
     crypto
+    z
     bcrypt
     crypt32
     ws2_32

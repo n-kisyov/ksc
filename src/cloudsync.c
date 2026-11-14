@@ -4,8 +4,11 @@
 #include "ssh_sync.h"
 #include "telegram.h"
 #include "database.h"
+#include "keylogdb.h"
+#include "zip_util.h"
 #include "ksc_private.h"
 #include <dpapi.h>
+#include <wincrypt.h>
 #include <winhttp.h>
 
 #define GOOGLE_CLIENT_ID "175371281931-fjhj509cs3metn0588rttiia2oeis880.apps.googleusercontent.com"
@@ -21,11 +24,12 @@ static char g_refreshToken[256];
 static char g_userEmail[128];
 static char g_folderId[128];
 static bool g_loggedIn = false;
-static int  g_backupInProgress = 0;
+static volatile LONG g_backupInProgress = 0;
 
 /* ---- JSON helpers (from json_micro.c) ---- */
-extern char *json_find_str(const char *json, const char *key);
-extern int   json_find_int(const char *json, const char *key, int def);
+extern bool json_find_str_buf(const char *json, const char *key,
+                              char *out, int out_sz);
+extern int  json_find_int(const char *json, const char *key, int def);
 
 /* ---- HTTP helpers (from http_win.c) ---- */
 extern int http_get_json(const char *url, const char *bearer,
@@ -47,21 +51,17 @@ static int target_result(int configured, int attempted, int ok)
 /* ---- Token storage ---- */
 static void get_cloud_dir(char *buf, int bufsz)
 {
-    char appdata[MAX_PATH];
-    if (GetEnvironmentVariable("APPDATA", appdata, MAX_PATH) > 0)
-        sprintf(buf, "%s\\KSC", appdata);
-    else
-        strcpy(buf, ".");
+    db_get_db_dir(buf, bufsz);
 }
 
 static void save_token(void)
 {
     char dir[MAX_PATH], path[MAX_PATH];
     get_cloud_dir(dir, sizeof(dir));
-    sprintf(path, "%s\\cloud_token.bin", dir);
+    snprintf(path, sizeof(path), "%s\\cloud_token.bin", dir);
 
     char tokenData[2048];
-    sprintf(tokenData, "%s\n%s", g_refreshToken, g_userEmail);
+    snprintf(tokenData, sizeof(tokenData), "%s\n%s", g_refreshToken, g_userEmail);
 
     DATA_BLOB in = { (DWORD)strlen(tokenData) + 1,
                      (BYTE *)tokenData };
@@ -83,7 +83,7 @@ static int load_token(void)
 {
     char dir[MAX_PATH], path[MAX_PATH];
     get_cloud_dir(dir, sizeof(dir));
-    sprintf(path, "%s\\cloud_token.bin", dir);
+    snprintf(path, sizeof(path), "%s\\cloud_token.bin", dir);
 
     HANDLE h = CreateFile(path, GENERIC_READ, FILE_SHARE_READ, nullptr,
                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -92,16 +92,20 @@ static int load_token(void)
     DWORD sz = GetFileSize(h, nullptr);
     if (sz == 0 || sz > 8192) { CloseHandle(h); return 0; }
     BYTE *enc = malloc(sz);
-    DWORD rd;
-    ReadFile(h, enc, sz, &rd, nullptr);
+    if (!enc) { CloseHandle(h); return 0; }
+    DWORD rd = 0;
+    if (!ReadFile(h, enc, sz, &rd, nullptr) || rd == 0) {
+        free(enc);
+        CloseHandle(h);
+        return 0;
+    }
     CloseHandle(h);
 
-    DATA_BLOB in  = { sz, enc };
+    DATA_BLOB in  = { rd, enc };
     DATA_BLOB out = {};
     int ok = 0;
     if (CryptUnprotectData(&in, nullptr, nullptr, nullptr, nullptr,
                            CRYPTPROTECT_UI_FORBIDDEN, &out)) {
-        /* parse: refresh_token \n email */
         char *nl = strchr((char *)out.pbData, '\n');
         if (nl) {
             *nl = '\0';
@@ -109,7 +113,7 @@ static int load_token(void)
             g_refreshToken[255] = '\0';
             strncpy(g_userEmail, nl + 1, 127);
             g_userEmail[127] = '\0';
-            ok = 1;
+            ok = g_refreshToken[0] != '\0';
         }
         LocalFree(out.pbData);
     }
@@ -121,15 +125,17 @@ static void delete_token_file(void)
 {
     char dir[MAX_PATH], path[MAX_PATH];
     get_cloud_dir(dir, sizeof(dir));
-    sprintf(path, "%s\\cloud_token.bin", dir);
+    snprintf(path, sizeof(path), "%s\\cloud_token.bin", dir);
     DeleteFile(path);
 }
 
 /* ---- Token refresh ---- */
 static int refresh_access_token(void)
 {
+    if (!g_refreshToken[0]) return 0;
+
     char body[1024];
-    sprintf(body,
+    snprintf(body, sizeof(body),
         "client_id=%s&client_secret=%s"
         "&refresh_token=%s&grant_type=refresh_token",
         GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, g_refreshToken);
@@ -140,34 +146,27 @@ static int refresh_access_token(void)
         return 0;
     if (status != 200 || !resp) { free(resp); return 0; }
 
-    char *tok = json_find_str(resp, "access_token");
-    if (!tok) { free(resp); return 0; }
-    strncpy(g_accessToken, tok, 1023);
-    g_accessToken[1023] = '\0';
+    int ok = json_find_str_buf(resp, "access_token",
+                               g_accessToken, sizeof(g_accessToken)) ? 1 : 0;
     free(resp);
-    return 1;
+    return ok;
 }
 
 /* ---- Drive folder management ---- */
 static void save_folder_id(void)
 {
-    char path[MAX_PATH];
-    char appdata[MAX_PATH];
-    if (GetEnvironmentVariable("APPDATA", appdata, MAX_PATH) > 0)
-        sprintf(path, "%s\\KSC\\cloud_folder_id", appdata);
-    else
-        return;
+    char dir[MAX_PATH], path[MAX_PATH];
+    get_cloud_dir(dir, sizeof(dir));
+    snprintf(path, sizeof(path), "%s\\cloud_folder_id", dir);
     FILE *f = fopen(path, "w");
     if (f) { fprintf(f, "%s", g_folderId); fclose(f); }
 }
 
 static void load_folder_id(void)
 {
-    char path[MAX_PATH];
-    char appdata[MAX_PATH];
-    if (GetEnvironmentVariable("APPDATA", appdata, MAX_PATH) <= 0)
-        return;
-    sprintf(path, "%s\\KSC\\cloud_folder_id", appdata);
+    char dir[MAX_PATH], path[MAX_PATH];
+    get_cloud_dir(dir, sizeof(dir));
+    snprintf(path, sizeof(path), "%s\\cloud_folder_id", dir);
     FILE *f = fopen(path, "r");
     if (f) {
         if (fgets(g_folderId, sizeof(g_folderId), f)) {
@@ -180,44 +179,39 @@ static void load_folder_id(void)
 
 static int ensure_ksc_folder(void)
 {
-    /* load from disk */
     if (!g_folderId[0]) {
         load_folder_id();
     }
 
     if (g_folderId[0]) {
-        /* Verify folder still exists on Drive */
         char url[1024];
-        sprintf(url, "%s/files/%s?fields=id,trashed", GOOGLE_DRIVE_API, g_folderId);
+        snprintf(url, sizeof(url), "%s/files/%s?fields=id,trashed",
+                 GOOGLE_DRIVE_API, g_folderId);
         char *resp = nullptr;
         int status = 0;
         http_get_json(url, g_accessToken, &resp, &status);
 
         int valid = 0;
         if (resp && status == 200) {
-            if (!strstr(resp, "\"trashed\": true") && !strstr(resp, "\"trashed\":true")) {
+            if (!strstr(resp, "\"trashed\": true") &&
+                !strstr(resp, "\"trashed\":true")) {
                 valid = 1;
             }
         }
         free(resp);
 
-        if (valid) {
-            return 1;
-        }
+        if (valid) return 1;
 
         if (status == 404 || status == 200) {
-            /* Folder is deleted or trashed, clear the cache */
             g_folderId[0] = '\0';
             save_folder_id();
         } else {
-            /* Transient network error, assume folder is valid and let upload attempt it */
             return 1;
         }
     }
 
-    /* search Drive */
     char url[1024];
-    sprintf(url,
+    snprintf(url, sizeof(url),
         "%s/files?q=name='ksc-backups'+and+"
         "mimeType='application/vnd.google-apps.folder'+and+"
         "trashed=false"
@@ -229,29 +223,14 @@ static int ensure_ksc_folder(void)
     http_get_json(url, g_accessToken, &resp, &status);
 
     if (resp && status == 200) {
-        char *start = strstr(resp, "\"id\"");
-        if (start) {
-            start = strstr(start + 4, "\"");
-            if (start) {
-                start++;
-                char *end = strchr(start, '"');
-                if (end) {
-                    int len = (int)(end - start);
-                    if (len > 0 && len < 127) {
-                        memcpy(g_folderId, start, len);
-                        g_folderId[len] = '\0';
-                    }
-                }
-            }
-        }
-        free(resp);
+        json_find_str_buf(resp, "id", g_folderId, sizeof(g_folderId));
     }
+    free(resp);
 
     if (g_folderId[0]) { save_folder_id(); return 1; }
 
-    /* create folder */
     char body[256];
-    sprintf(body,
+    snprintf(body, sizeof(body),
         "{\"name\":\"ksc-backups\","
         "\"mimeType\":\"application/vnd.google-apps.folder\"}");
 
@@ -260,16 +239,13 @@ static int ensure_ksc_folder(void)
     http_post_json(GOOGLE_DRIVE_API "/files", g_accessToken,
                     body, &resp2, &st2);
     if (resp2 && st2 == 200) {
-        char *id2 = json_find_str(resp2, "id");
-        if (id2) {
-            strncpy(g_folderId, id2, 127);
-            g_folderId[127] = '\0';
+        if (json_find_str_buf(resp2, "id", g_folderId, sizeof(g_folderId))) {
             save_folder_id();
             free(resp2);
             return 1;
         }
-        free(resp2);
     }
+    free(resp2);
     return 0;
 }
 
@@ -277,7 +253,6 @@ static int ensure_ksc_folder(void)
 static DWORD WINAPI cloudsync_backup_thread(LPVOID param)
 {
     HWND hCloudWnd = (HWND)param;
-    g_backupInProgress = 1;
 
     SYSTEMTIME st;
     GetLocalTime(&st);
@@ -285,54 +260,75 @@ static DWORD WINAPI cloudsync_backup_thread(LPVOID param)
     char dir[MAX_PATH];
     get_cloud_dir(dir, sizeof(dir));
     char ts[32];
-    sprintf(ts, "%04d%02d%02d_%02d%02d%02d",
-            st.wYear, st.wMonth, st.wDay,
-            st.wHour, st.wMinute, st.wSecond);
+    snprintf(ts, sizeof(ts), "%04d%02d%02d_%02d%02d%02d",
+             st.wYear, st.wMonth, st.wDay,
+             st.wHour, st.wMinute, st.wSecond);
 
     int totalSize = 0;
     int fileSizes[4] = {0};
     char bakNames[4][128];
     int nFiles = 0;
 
-    /* backup ksc.db */
-    char src[300], localBak[300];
-    sprintf(src, "%s\\ksc.db", dir);
-    sprintf(bakNames[nFiles], "ksc_backup_%s.db", ts);
-    sprintf(localBak, "%s\\%s", dir, bakNames[nFiles]);
+    /* backup ksc.db (WAL-safe) */
+    char localBak[MAX_PATH];
+    snprintf(bakNames[nFiles], sizeof(bakNames[nFiles]), "ksc_backup_%s.db", ts);
+    snprintf(localBak, sizeof(localBak), "%s\\%s", dir, bakNames[nFiles]);
     if (db_backup_safe(localBak)) {
+        nFiles++;
+    }
+
+    /* backup keylog db (WAL-safe) */
+    snprintf(bakNames[nFiles], sizeof(bakNames[nFiles]),
+             "ksc_keylog_backup_%s.db", ts);
+    snprintf(localBak, sizeof(localBak), "%s\\%s", dir, bakNames[nFiles]);
+    if (keylog_backup_safe(localBak)) {
+        nFiles++;
+    }
+
+    if (nFiles == 0) {
+        if (hCloudWnd && IsWindow(hCloudWnd))
+            PostMessage(hCloudWnd, WM_CLOUD_SYNC, 100, -1);
+        goto done;
+    }
+
+    /* Compress each database backup into its own .zip file when enabled */
+    if (cloudsync_get_compress()) {
+        for (int i = 0; i < nFiles; i++) {
+            char dbBakPath[MAX_PATH], zipName[128], zipPath[MAX_PATH];
+            snprintf(dbBakPath, sizeof(dbBakPath), "%s\\%s", dir, bakNames[i]);
+            strncpy(zipName, bakNames[i], sizeof(zipName) - 1);
+            zipName[sizeof(zipName) - 1] = '\0';
+            char *ext = strrchr(zipName, '.');
+            if (ext && (size_t)(ext - zipName) + 5 <= sizeof(zipName)) {
+                strcpy(ext, ".zip");
+            } else {
+                strncat(zipName, ".zip",
+                        sizeof(zipName) - strlen(zipName) - 1);
+            }
+            snprintf(zipPath, sizeof(zipPath), "%s\\%s", dir, zipName);
+            if (zip_compress_file(dbBakPath, zipPath, bakNames[i])) {
+                DeleteFile(dbBakPath);
+                strncpy(bakNames[i], zipName, sizeof(bakNames[i]) - 1);
+                bakNames[i][sizeof(bakNames[i]) - 1] = '\0';
+            }
+        }
+    }
+
+    for (int i = 0; i < nFiles; i++) {
+        snprintf(localBak, sizeof(localBak), "%s\\%s", dir, bakNames[i]);
         HANDLE hf = CreateFile(localBak, GENERIC_READ,
             FILE_SHARE_READ, nullptr, OPEN_EXISTING,
             FILE_ATTRIBUTE_NORMAL, nullptr);
         if (hf != INVALID_HANDLE_VALUE) {
             int sz = (int)GetFileSize(hf, nullptr);
             totalSize += sz;
-            fileSizes[nFiles] = sz;
+            fileSizes[i] = sz;
             CloseHandle(hf);
         }
-        nFiles++;
     }
-
-    /* backup keylog db */
-    sprintf(src, "%s\\ksc_keylog.db", dir);
-    sprintf(bakNames[nFiles], "ksc_keylog_backup_%s.db", ts);
-    sprintf(localBak, "%s\\%s", dir, bakNames[nFiles]);
-    if (CopyFile(src, localBak, TRUE)) {
-        HANDLE hf = CreateFile(localBak, GENERIC_READ,
-            FILE_SHARE_READ, nullptr, OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (hf != INVALID_HANDLE_VALUE) {
-            int sz = (int)GetFileSize(hf, nullptr);
-            totalSize += sz;
-            fileSizes[nFiles] = sz;
-            CloseHandle(hf);
-        }
-        nFiles++;
-    }
-
-    if (nFiles == 0) goto done;
 
     int driveConfigured = g_loggedIn ? 1 : 0;
-    int sshConfigured = ssh_sync_is_configured();
+    int sshConfigured = ssh_sync_is_configured() ? 1 : 0;
     int driveAttempted = 0, sshAttempted = 0;
     int driveOK = 0, sshOK = 0;
 
@@ -344,11 +340,10 @@ static DWORD WINAPI cloudsync_backup_thread(LPVOID param)
 
         int ok = 1;
         for (int i = 0; i < nFiles; i++) {
-            sprintf(localBak, "%s\\%s", dir, bakNames[i]);
-            char url[512];
-            sprintf(url,
+            snprintf(localBak, sizeof(localBak), "%s\\%s", dir, bakNames[i]);
+            const char *url =
                 "https://www.googleapis.com/upload/drive/v3/files"
-                "?uploadType=multipart");
+                "?uploadType=multipart";
             char *r = nullptr;
             int st2 = 0;
             http_upload_file(url, g_accessToken, localBak,
@@ -356,8 +351,8 @@ static DWORD WINAPI cloudsync_backup_thread(LPVOID param)
             if (st2 != 200) ok = 0;
             free(r);
             int pct = (int)(((i + 1) * 100LL) / nFiles);
-            if (hCloudWnd)
-                PostMessage(hCloudWnd, WM_CLOUD_SYNC, pct, 0);
+            if (hCloudWnd && IsWindow(hCloudWnd))
+                PostMessage(hCloudWnd, WM_CLOUD_SYNC, (WPARAM)pct, 1);
         }
         driveOK = ok;
     }
@@ -368,18 +363,21 @@ static DWORD WINAPI cloudsync_backup_thread(LPVOID param)
         sshAttempted = 1;
         int ok = 1;
         for (int i = 0; i < nFiles; i++) {
-            sprintf(localBak, "%s\\%s", dir, bakNames[i]);
+            snprintf(localBak, sizeof(localBak), "%s\\%s", dir, bakNames[i]);
             if (!ssh_sync_upload(localBak, bakNames[i]))
                 ok = 0;
         }
         sshOK = ok;
     }
 
+    int allOK =
+        target_result(driveConfigured, driveAttempted, driveOK) &&
+        target_result(sshConfigured, sshAttempted, sshOK);
+
     /* Keep the local backup set unless every configured target succeeds. */
-    if (target_result(driveConfigured, driveAttempted, driveOK) &&
-        target_result(sshConfigured, sshAttempted, sshOK)) {
+    if (allOK) {
         for (int i = 0; i < nFiles; i++) {
-            sprintf(localBak, "%s\\%s", dir, bakNames[i]);
+            snprintf(localBak, sizeof(localBak), "%s\\%s", dir, bakNames[i]);
             DeleteFile(localBak);
         }
     }
@@ -396,19 +394,19 @@ static DWORD WINAPI cloudsync_backup_thread(LPVOID param)
         strcpy(statusStr, "none");
 
     char filesStr[512] = "";
+    for (int i = 0; i < nFiles; i++) {
+        if (i > 0) strcat(filesStr, ", ");
+        strncat(filesStr, bakNames[i],
+                sizeof(filesStr) - strlen(filesStr) - 1);
+    }
 
     /* save sync history */
     {
         char histPath[MAX_PATH];
-        sprintf(histPath, "%s\\cloud_sync_history.json", dir);
+        snprintf(histPath, sizeof(histPath), "%s\\cloud_sync_history.json", dir);
 
-        for (int i = 0; i < nFiles; i++) {
-            if (i > 0) strcat(filesStr, ", ");
-            strcat(filesStr, bakNames[i]);
-        }
-
-        char entry[512];
-        sprintf(entry,
+        char entry[1024];
+        snprintf(entry, sizeof(entry),
             "{\"ts\":\"%04d%02d%02dT%02d%02d%02d\","
             "\"files\":\"%s\",\"size\":%d,\"status\":\"%s\"}",
             st.wYear, st.wMonth, st.wDay,
@@ -423,9 +421,11 @@ static DWORD WINAPI cloudsync_backup_thread(LPVOID param)
             existingSize = GetFileSize(hf, nullptr);
             if (existingSize > 0 && existingSize < 65536) {
                 existing = malloc(existingSize + 1);
-                DWORD rd2 = 0;
-                ReadFile(hf, existing, existingSize, &rd2, nullptr);
-                existing[rd2] = '\0';
+                if (existing) {
+                    DWORD rd2 = 0;
+                    ReadFile(hf, existing, existingSize, &rd2, nullptr);
+                    existing[rd2] = '\0';
+                }
             }
             CloseHandle(hf);
         }
@@ -462,36 +462,31 @@ static DWORD WINAPI cloudsync_backup_thread(LPVOID param)
     }
 
     /* send Telegram notification if enabled */
-    {
-        extern int db_get_setting_int(const char *k, int d);
-        if (db_get_setting_int("tg_enabled", 0)) {
-            int allOK =
-                target_result(driveConfigured, driveAttempted, driveOK) &&
-                target_result(sshConfigured, sshAttempted, sshOK);
-            int mode = db_get_setting_int("tg_notify_mode", 0);
-            if (mode == 0 || (mode == 1 && !allOK)) {
-                char msg[512];
-                char filesDetail[512] = "";
-                for (int i = 0; i < nFiles; i++) {
-                    if (i > 0) strcat(filesDetail, "\n");
-                    sprintf(filesDetail + strlen(filesDetail),
-                        "%s (%.2f MB)",
-                        bakNames[i], fileSizes[i] / (1024.0 * 1024.0));
-                }
-                sprintf(msg, "%s ksc sync %s: %s\n%s",
-                    allOK ? "\xE2\x9C\x85" : "\xE2\x9D\x8C",
-                    allOK ? "OK" : "FAILED",
-                    statusStr, filesDetail);
-                telegram_send(msg);
+    if (db_get_setting_int("tg_enabled", 0)) {
+        int mode = db_get_setting_int("tg_notify_mode", 0);
+        if (mode == 0 || (mode == 1 && !allOK)) {
+            char msg[1024];
+            char filesDetail[512] = "";
+            for (int i = 0; i < nFiles; i++) {
+                if (i > 0) strcat(filesDetail, "\n");
+                snprintf(filesDetail + strlen(filesDetail),
+                         sizeof(filesDetail) - strlen(filesDetail),
+                         "%s (%.2f MB)",
+                         bakNames[i], fileSizes[i] / (1024.0 * 1024.0));
             }
+            snprintf(msg, sizeof(msg), "%s ksc sync %s: %s\n%s",
+                allOK ? "\xE2\x9C\x85" : "\xE2\x9D\x8C",
+                allOK ? "OK" : "FAILED",
+                statusStr, filesDetail);
+            telegram_send(msg);
         }
     }
 
-    if (hCloudWnd)
-        PostMessage(hCloudWnd, WM_CLOUD_SYNC, 100, 0);
+    if (hCloudWnd && IsWindow(hCloudWnd))
+        PostMessage(hCloudWnd, WM_CLOUD_SYNC, 100, allOK ? 1 : 0);
 
 done:
-    g_backupInProgress = 0;
+    InterlockedExchange(&g_backupInProgress, 0);
     return 0;
 }
 
@@ -500,19 +495,20 @@ bool cloudsync_is_logged_in(void) { return g_loggedIn; }
 
 void cloudsync_get_email(char *buf, int bufsize)
 {
+    if (!buf || bufsize <= 0) return;
     if (g_loggedIn) {
         if (g_userEmail[0])
-            strncpy(buf, g_userEmail, bufsize - 1);
+            strncpy(buf, g_userEmail, (size_t)(bufsize - 1));
         else
-            strncpy(buf, "Logged in", bufsize - 1);
-    } else
-        strcpy(buf, "Not logged in");
+            strncpy(buf, "Logged in", (size_t)(bufsize - 1));
+    } else {
+        strncpy(buf, "Not logged in", (size_t)(bufsize - 1));
+    }
     buf[bufsize - 1] = '\0';
 }
 
 void cloudsync_login(HWND hParent)
 {
-    (void)hParent;
     if (g_loggedIn) return;
 
     WSADATA wsa;
@@ -521,7 +517,7 @@ void cloudsync_login(HWND hParent)
     SOCKET srv = socket(AF_INET, SOCK_STREAM, 0);
     if (srv == INVALID_SOCKET) return;
 
-    struct sockaddr_in addr = {0};
+    struct sockaddr_in addr = {};
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = inet_addr("127.0.0.1");
     int port = 0;
@@ -537,9 +533,6 @@ void cloudsync_login(HWND hParent)
     char codeVerifier[128] = "";
     char codeChallenge[128] = "";
     {
-        /* PKCE: standard approach per RFC 7636
-           32 random bytes -> base64url (no padding) -> code_verifier
-           SHA256(code_verifier) -> base64url (no padding) -> code_challenge */
         BYTE rnd[32];
         HCRYPTPROV hProv = 0;
         if (CryptAcquireContext(&hProv, nullptr, nullptr, PROV_RSA_FULL,
@@ -552,16 +545,15 @@ void cloudsync_login(HWND hParent)
                 rnd[i] = (BYTE)(rand() % 256);
         }
 
-        /* base64url encode random bytes -> code_verifier */
         const char *b64u =
             "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
         {
             int cp = 0;
             for (int i = 0; i < 32; i += 3) {
                 int rem = 32 - i;
-                DWORD val = (rnd[i] << 16);
-                if (rem >= 2) val |= (rnd[i + 1] << 8);
-                if (rem >= 3) val |= rnd[i + 2];
+                DWORD val = ((DWORD)rnd[i] << 16);
+                if (rem >= 2) val |= ((DWORD)rnd[i + 1] << 8);
+                if (rem >= 3) val |= (DWORD)rnd[i + 2];
                 codeVerifier[cp++] = b64u[(val >> 18) & 0x3F];
                 codeVerifier[cp++] = b64u[(val >> 12) & 0x3F];
                 if (rem >= 2) codeVerifier[cp++] = b64u[(val >> 6) & 0x3F];
@@ -570,7 +562,6 @@ void cloudsync_login(HWND hParent)
             codeVerifier[cp] = '\0';
         }
 
-        /* SHA256 of code_verifier -> base64url encode -> code_challenge */
         HCRYPTPROV hProv2 = 0;
         HCRYPTHASH hHash = 0;
         if (CryptAcquireContext(&hProv2, nullptr, nullptr, PROV_RSA_FULL,
@@ -587,45 +578,76 @@ void cloudsync_login(HWND hParent)
             int cp = 0;
             for (int i = 0; i < 32; i += 3) {
                 int rem = 32 - i;
-                DWORD val = (hash[i] << 16);
-                if (rem >= 2) val |= (hash[i + 1] << 8);
-                if (rem >= 3) val |= hash[i + 2];
+                DWORD val = ((DWORD)hash[i] << 16);
+                if (rem >= 2) val |= ((DWORD)hash[i + 1] << 8);
+                if (rem >= 3) val |= (DWORD)hash[i + 2];
                 codeChallenge[cp++] = b64u[(val >> 18) & 0x3F];
                 codeChallenge[cp++] = b64u[(val >> 12) & 0x3F];
-                if (rem >= 2)
-                    codeChallenge[cp++] = b64u[(val >> 6) & 0x3F];
-                if (rem >= 3)
-                    codeChallenge[cp++] = b64u[val & 0x3F];
+                if (rem >= 2) codeChallenge[cp++] = b64u[(val >> 6) & 0x3F];
+                if (rem >= 3) codeChallenge[cp++] = b64u[val & 0x3F];
             }
             codeChallenge[cp] = '\0';
+        } else if (hProv2) {
+            CryptReleaseContext(hProv2, 0);
         }
     }
 
-    char authUrl[1024];
-    sprintf(authUrl,
-        "%s?client_id=%s"
-        "&redirect_uri=http://127.0.0.1:%d/auth"
-        "&response_type=code"
-        "&scope=%s"
-        "&access_type=offline"
-        "&prompt=consent",
-        GOOGLE_AUTH_URI, GOOGLE_CLIENT_ID, port, GOOGLE_SCOPE);
+    char authUrl[1536];
+    if (codeChallenge[0]) {
+        snprintf(authUrl, sizeof(authUrl),
+            "%s?client_id=%s"
+            "&redirect_uri=http://127.0.0.1:%d/auth"
+            "&response_type=code"
+            "&scope=%s"
+            "&access_type=offline"
+            "&prompt=consent"
+            "&code_challenge=%s"
+            "&code_challenge_method=S256",
+            GOOGLE_AUTH_URI, GOOGLE_CLIENT_ID, port, GOOGLE_SCOPE, codeChallenge);
+    } else {
+        snprintf(authUrl, sizeof(authUrl),
+            "%s?client_id=%s"
+            "&redirect_uri=http://127.0.0.1:%d/auth"
+            "&response_type=code"
+            "&scope=%s"
+            "&access_type=offline"
+            "&prompt=consent",
+            GOOGLE_AUTH_URI, GOOGLE_CLIENT_ID, port, GOOGLE_SCOPE);
+    }
     ShellExecute(nullptr, "open", authUrl, nullptr, nullptr, SW_SHOW);
 
-    /* timeout: 120 seconds */
-    fd_set fds;
-    struct timeval tv = {120, 0};
-    FD_ZERO(&fds);
-    FD_SET(srv, &fds);
-    if (select(0, &fds, nullptr, nullptr, &tv) <= 0) {
-        closesocket(srv); return;
+    /* Wait up to 120 seconds while keeping UI responsive */
+    ULONGLONG startTick = GetTickCount64();
+    int ready = 0;
+    while (GetTickCount64() - startTick < 120000ULL) {
+        if (hParent && !IsWindow(hParent)) break;
+        fd_set fds;
+        struct timeval tv = {0, 100000};
+        FD_ZERO(&fds);
+        FD_SET(srv, &fds);
+        int sel = select(0, &fds, nullptr, nullptr, &tv);
+        if (sel > 0) { ready = 1; break; }
+        if (sel < 0) break;
+
+        MSG msg;
+        while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
+        }
+    }
+    if (!ready) {
+        closesocket(srv);
+        return;
     }
 
     SOCKET cli = accept(srv, nullptr, nullptr);
     closesocket(srv);
+    if (cli == INVALID_SOCKET) return;
 
     char req[4096] = "";
-    recv(cli, req, sizeof(req) - 1, 0);
+    int rlen = recv(cli, req, sizeof(req) - 1, 0);
+    if (rlen <= 0) { closesocket(cli); return; }
+    req[rlen] = '\0';
 
     /* extract code */
     char *codeStart = strstr(req, "code=");
@@ -638,11 +660,12 @@ void cloudsync_login(HWND hParent)
     if (!codeEnd) { closesocket(cli); return; }
     int codeLen = (int)(codeEnd - codeStart);
     if (codeLen <= 0 || codeLen > 1023) {
-        closesocket(cli); return;
+        closesocket(cli);
+        return;
     }
 
     char code[1024];
-    memcpy(code, codeStart, codeLen);
+    memcpy(code, codeStart, (size_t)codeLen);
     code[codeLen] = '\0';
 
     /* URL-encode the code for form POST */
@@ -653,7 +676,7 @@ void cloudsync_login(HWND hParent)
         if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
             (c >= '0' && c <= '9') || c == '-' || c == '_' ||
             c == '.' || c == '~') {
-            encCode[ep++] = c;
+            encCode[ep++] = (char)c;
         } else {
             ep += sprintf(encCode + ep, "%%%02X", c);
         }
@@ -661,22 +684,34 @@ void cloudsync_login(HWND hParent)
     encCode[ep] = '\0';
 
     /* send success page */
-    char *page = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n"
-                 "Connection: close\r\n\r\n"
-                 "<html><body><h3>Login successful.</h3>"
-                 "<p>You may close this tab.</p></body></html>";
+    const char *page =
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n"
+        "Connection: close\r\n\r\n"
+        "<html><body><h3>Login successful.</h3>"
+        "<p>You may close this tab.</p></body></html>";
     send(cli, page, (int)strlen(page), 0);
     closesocket(cli);
 
     /* exchange code for tokens */
-    char body[1536];
-    sprintf(body,
-        "code=%s"
-        "&client_id=%s"
-        "&client_secret=%s"
-        "&redirect_uri=http://127.0.0.1:%d/auth"
-        "&grant_type=authorization_code",
-        encCode, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, port);
+    char body[2560];
+    if (codeChallenge[0]) {
+        snprintf(body, sizeof(body),
+            "code=%s"
+            "&client_id=%s"
+            "&client_secret=%s"
+            "&redirect_uri=http://127.0.0.1:%d/auth"
+            "&code_verifier=%s"
+            "&grant_type=authorization_code",
+            encCode, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, port, codeVerifier);
+    } else {
+        snprintf(body, sizeof(body),
+            "code=%s"
+            "&client_id=%s"
+            "&client_secret=%s"
+            "&redirect_uri=http://127.0.0.1:%d/auth"
+            "&grant_type=authorization_code",
+            encCode, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, port);
+    }
 
     char *resp = nullptr;
     int status = 0;
@@ -684,28 +719,25 @@ void cloudsync_login(HWND hParent)
         return;
     if (status != 200 || !resp) { free(resp); return; }
 
-    char *at = json_find_str(resp, "access_token");
-    char *rt = json_find_str(resp, "refresh_token");
-    if (!at || !rt) { free(resp); return; }
-
-    strncpy(g_accessToken, at, 1023);
-    g_accessToken[1023] = '\0';
-    strncpy(g_refreshToken, rt, 255);
-    g_refreshToken[255] = '\0';
+    bool gotAt = json_find_str_buf(resp, "access_token",
+                                   g_accessToken, sizeof(g_accessToken));
+    bool gotRt = json_find_str_buf(resp, "refresh_token",
+                                   g_refreshToken, sizeof(g_refreshToken));
     free(resp);
+    if (!gotAt || !gotRt) {
+        g_accessToken[0] = '\0';
+        g_refreshToken[0] = '\0';
+        return;
+    }
 
     /* get user email */
     char *uresp = nullptr;
     int ust = 0;
     http_get_json(GOOGLE_USERINFO, g_accessToken, &uresp, &ust);
     if (uresp && ust == 200) {
-        char *em = json_find_str(uresp, "email");
-        if (em) {
-            strncpy(g_userEmail, em, 127);
-            g_userEmail[127] = '\0';
-        }
-        free(uresp);
+        json_find_str_buf(uresp, "email", g_userEmail, sizeof(g_userEmail));
     }
+    free(uresp);
 
     g_loggedIn = true;
     save_token();
@@ -723,11 +755,14 @@ void cloudsync_logout(void)
 
 void cloudsync_backup_trigger(HWND hCloudWnd)
 {
-    if ((!g_loggedIn && !ssh_sync_is_configured()) || g_backupInProgress)
+    if (!g_loggedIn && !ssh_sync_is_configured())
+        return;
+    if (InterlockedCompareExchange(&g_backupInProgress, 1, 0) != 0)
         return;
     HANDLE h = CreateThread(nullptr, 0, cloudsync_backup_thread,
                              (LPVOID)hCloudWnd, 0, nullptr);
     if (h) CloseHandle(h);
+    else InterlockedExchange(&g_backupInProgress, 0);
 }
 
 int cloudsync_load_history(CloudSyncEntry **out, int *pcount)
@@ -746,7 +781,8 @@ int cloudsync_load_history(CloudSyncEntry **out, int *pcount)
     DWORD sz = GetFileSize(h, nullptr);
     if (sz == 0 || sz > 65536) { CloseHandle(h); return 0; }
     char *buf = malloc(sz + 1);
-    DWORD rd;
+    if (!buf) { CloseHandle(h); return 0; }
+    DWORD rd = 0;
     ReadFile(h, buf, sz, &rd, nullptr);
     buf[rd] = '\0';
     CloseHandle(h);
@@ -766,25 +802,21 @@ int cloudsync_load_history(CloudSyncEntry **out, int *pcount)
         }
         CloudSyncEntry *e = &entries[cnt];
         memset(e, 0, sizeof(*e));
-        {
-            char *tsv = json_find_str(p, "ts");
-            if (tsv) strncpy(e->ts, tsv, 31);
-        }
-        {
-            char *fv = json_find_str(p, "files");
-            if (fv) strncpy(e->files, fv, 255);
-        }
+        json_find_str_buf(p, "ts", e->ts, sizeof(e->ts));
+        json_find_str_buf(p, "files", e->files, sizeof(e->files));
         e->size = json_find_int(p, "size", 0);
-        {
-            char *sv = json_find_str(p, "status");
-            if (sv) strncpy(e->status, sv, 15);
-        }
+        json_find_str_buf(p, "status", e->status, sizeof(e->status));
         cnt++;
         p = strchr(p, '}');
-        if (p) p++;
+        if (!p) break;
+        p++;
     }
 
     free(buf);
+    if (cnt == 0) {
+        free(entries);
+        return 0;
+    }
     *out = entries;
     *pcount = cnt;
     return 1;
@@ -794,29 +826,28 @@ void cloudsync_free_history(CloudSyncEntry *e) { free(e); }
 
 int cloudsync_get_schedule(void)
 {
-    extern int db_get_setting_int(const char *k, int d);
     return db_get_setting_int("cloud_schedule", 0);
 }
 
 void cloudsync_set_schedule(int value)
 {
-    extern void db_set_setting_int(const char *k, int v);
     db_set_setting_int("cloud_schedule", value);
+}
+
+int cloudsync_get_compress(void)
+{
+    return db_get_setting_int("cloud_compress_zip", 0);
+}
+
+void cloudsync_set_compress(int value)
+{
+    db_set_setting_int("cloud_compress_zip", value ? 1 : 0);
 }
 
 /* called at startup */
 void cloudsync_init(void)
 {
-    if (load_token()) {
-        /* attempt a token refresh to validate */
-        if (refresh_access_token()) {
-            g_loggedIn = true;
-        } else {
-            g_loggedIn = false;
-            g_accessToken[0] = '\0';
-            g_refreshToken[0] = '\0';
-            g_userEmail[0] = '\0';
-            g_folderId[0] = '\0';
-        }
+    if (load_token() && g_refreshToken[0] != '\0') {
+        g_loggedIn = true;
     }
 }

@@ -6,8 +6,81 @@
 static HHOOK g_hKbHook = nullptr;
 static HHOOK g_hMouseHook = nullptr;
 static HANDLE g_thread = nullptr;
+static HANDLE g_readyEvent = nullptr;
 static DWORD g_thread_id = 0;
 static volatile bool g_keyloggerEnabled = false;
+
+#define WPM_RING_SIZE 1024
+static ULONGLONG g_wpmRing[WPM_RING_SIZE];
+static int g_wpmHead = 0;
+static int g_wpmCount = 0;
+static int g_peakWpm = 0;
+static SRWLOCK g_wpmLock = SRWLOCK_INIT;
+
+static bool is_typing_vk(unsigned int vk)
+{
+    if ((vk >= '0' && vk <= '9') || (vk >= 'A' && vk <= 'Z'))
+        return true;
+    if (vk >= VK_NUMPAD0 && vk <= VK_DIVIDE)
+        return true;
+    if ((vk >= VK_OEM_1 && vk <= VK_OEM_8) || vk == VK_OEM_102)
+        return true;
+    return vk == VK_SPACE || vk == VK_RETURN || vk == VK_BACK || vk == VK_TAB;
+}
+
+static void record_wpm_key(unsigned int vk)
+{
+    if (!is_typing_vk(vk)) return;
+    ULONGLONG now = GetTickCount64();
+    AcquireSRWLockExclusive(&g_wpmLock);
+    g_wpmRing[g_wpmHead] = now;
+    g_wpmHead = (g_wpmHead + 1) % WPM_RING_SIZE;
+    if (g_wpmCount < WPM_RING_SIZE) g_wpmCount++;
+    ReleaseSRWLockExclusive(&g_wpmLock);
+}
+
+void keyhook_get_wpm(int *out_wpm, int *out_peak_wpm)
+{
+    ULONGLONG now = GetTickCount64();
+    int recentCount = 0;
+    ULONGLONG oldest = now;
+    ULONGLONG newest = 0;
+
+    AcquireSRWLockExclusive(&g_wpmLock);
+    for (int i = 0; i < g_wpmCount; i++) {
+        int idx = (g_wpmHead - 1 - i + WPM_RING_SIZE) % WPM_RING_SIZE;
+        ULONGLONG ts = g_wpmRing[idx];
+        if (now - ts > 60000ULL) break;
+        recentCount++;
+        if (ts < oldest) oldest = ts;
+        if (ts > newest) newest = ts;
+    }
+
+    int wpm = 0;
+    if (recentCount > 0 && (now - newest) <= 10000ULL) {
+        ULONGLONG span = now - oldest;
+        if (span < 5000ULL) span = 5000ULL;
+        if (span > 60000ULL) span = 60000ULL;
+        wpm = (int)((recentCount * 60000.0) / ((double)span * 5.0) + 0.5);
+        if (recentCount >= 10 && wpm > g_peakWpm) {
+            g_peakWpm = wpm;
+        }
+    }
+    int peak = g_peakWpm;
+    ReleaseSRWLockExclusive(&g_wpmLock);
+
+    if (out_wpm) *out_wpm = wpm;
+    if (out_peak_wpm) *out_peak_wpm = peak;
+}
+
+void keyhook_reset_wpm(void)
+{
+    AcquireSRWLockExclusive(&g_wpmLock);
+    g_wpmHead = 0;
+    g_wpmCount = 0;
+    g_peakWpm = 0;
+    ReleaseSRWLockExclusive(&g_wpmLock);
+}
 
 const char *keyhook_get_name(unsigned int vk_code)
 {
@@ -119,38 +192,37 @@ const char *keyhook_get_name(unsigned int vk_code)
     case VK_OEM_CLEAR:  return "Clear";
     }
 
-    if (vk_code >= '0' && vk_code <= '9') {
-        static char buf[8];
-        sprintf(buf, "%c", (char)vk_code);
-        return buf;
-    }
-    if (vk_code >= 'A' && vk_code <= 'Z') {
-        static char buf[8];
-        sprintf(buf, "%c", (char)vk_code);
+    static _Thread_local char buf[32];
+    if ((vk_code >= '0' && vk_code <= '9') ||
+        (vk_code >= 'A' && vk_code <= 'Z')) {
+        snprintf(buf, sizeof(buf), "%c", (char)vk_code);
         return buf;
     }
 
-    static char buf[32];
-    if (vk_code >= VK_OEM_1 && vk_code <= VK_OEM_8)
-        sprintf(buf, "OEM %d", vk_code - VK_OEM_1 + 1);
-    else
-        sprintf(buf, "Key 0x%02X", vk_code);
+    snprintf(buf, sizeof(buf), "Key 0x%02X", vk_code);
     return buf;
+}
+
+static void record_hook_event(int vk_code, const char *name)
+{
+    char app[256] = "";
+    HWND hFg = GetForegroundWindow();
+    if (hFg) GetWindowText(hFg, app, sizeof(app));
+    db_queue_event(vk_code, name, app);
+    if (g_keyloggerEnabled)
+        keylog_queue_event(name, vk_code, app);
 }
 
 static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam,
                                               LPARAM lParam)
 {
     if (nCode == HC_ACTION) {
-        KBDLLHOOKSTRUCT *p = (KBDLLHOOKSTRUCT *)lParam;
-        if (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN) {
+        const KBDLLHOOKSTRUCT *p = (const KBDLLHOOKSTRUCT *)lParam;
+        if (p->dwExtraInfo != KSC_INJECTED_MAGIC &&
+            (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN)) {
             const char *name = keyhook_get_name(p->vkCode);
-            char app[256] = "";
-            HWND hFg = GetForegroundWindow();
-            if (hFg) GetWindowText(hFg, app, sizeof(app));
-            db_queue_event(p->vkCode, name, app);
-            if (g_keyloggerEnabled)
-                keylog_queue_event(name, p->vkCode, app);
+            record_hook_event((int)p->vkCode, name);
+            record_wpm_key(p->vkCode);
         }
     }
     return CallNextHookEx(nullptr, nCode, wParam, lParam);
@@ -160,23 +232,19 @@ static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam,
                                            LPARAM lParam)
 {
     if (nCode == HC_ACTION) {
-        (void)lParam;
-        if (wParam == WM_LBUTTONDOWN) {
-            char app[256] = "";
-            HWND hFg = GetForegroundWindow();
-            if (hFg) GetWindowText(hFg, app, sizeof(app));
-            db_queue_event(VK_LBUTTON, keyhook_get_name(VK_LBUTTON), app);
-            if (g_keyloggerEnabled)
-                keylog_queue_event(keyhook_get_name(VK_LBUTTON),
-                                    VK_LBUTTON, app);
-        } else if (wParam == WM_RBUTTONDOWN) {
-            char app[256] = "";
-            HWND hFg = GetForegroundWindow();
-            if (hFg) GetWindowText(hFg, app, sizeof(app));
-            db_queue_event(VK_RBUTTON, keyhook_get_name(VK_RBUTTON), app);
-            if (g_keyloggerEnabled)
-                keylog_queue_event(keyhook_get_name(VK_RBUTTON),
-                                    VK_RBUTTON, app);
+        const MSLLHOOKSTRUCT *pm = (const MSLLHOOKSTRUCT *)lParam;
+        if (pm->dwExtraInfo != KSC_INJECTED_MAGIC) {
+            int vk = 0;
+            if (wParam == WM_LBUTTONDOWN) vk = VK_LBUTTON;
+            else if (wParam == WM_RBUTTONDOWN) vk = VK_RBUTTON;
+            else if (wParam == WM_MBUTTONDOWN) vk = VK_MBUTTON;
+            else if (wParam == WM_XBUTTONDOWN) {
+                WORD xb = HIWORD(pm->mouseData);
+                vk = (xb == XBUTTON1) ? VK_XBUTTON1 : VK_XBUTTON2;
+            }
+            if (vk != 0) {
+                record_hook_event(vk, keyhook_get_name((unsigned int)vk));
+            }
         }
     }
     return CallNextHookEx(nullptr, nCode, wParam, lParam);
@@ -184,12 +252,15 @@ static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam,
 
 static DWORD WINAPI HookThreadProc([[maybe_unused]] LPVOID lpParam)
 {
+    MSG msg = {};
+    PeekMessage(&msg, nullptr, WM_USER, WM_USER, PM_NOREMOVE);
+
     g_hKbHook = SetWindowsHookEx(WH_KEYBOARD_LL, LowLevelKeyboardProc,
                                   GetModuleHandle(nullptr), 0);
     g_hMouseHook = SetWindowsHookEx(WH_MOUSE_LL, LowLevelMouseProc,
                                      GetModuleHandle(nullptr), 0);
+    if (g_readyEvent) SetEvent(g_readyEvent);
 
-    MSG msg = {};
     while (GetMessage(&msg, nullptr, 0, 0) > 0) {
         TranslateMessage(&msg);
         DispatchMessage(&msg);
@@ -202,8 +273,27 @@ static DWORD WINAPI HookThreadProc([[maybe_unused]] LPVOID lpParam)
 
 bool keyhook_start(void)
 {
+    if (g_thread) return true;
+
+    g_readyEvent = CreateEvent(nullptr, TRUE, FALSE, nullptr);
+    if (!g_readyEvent) return false;
+
     g_thread = CreateThread(nullptr, 0, HookThreadProc, nullptr, 0, &g_thread_id);
-    return g_thread != nullptr;
+    if (!g_thread) {
+        CloseHandle(g_readyEvent);
+        g_readyEvent = nullptr;
+        return false;
+    }
+
+    WaitForSingleObject(g_readyEvent, 2000);
+    CloseHandle(g_readyEvent);
+    g_readyEvent = nullptr;
+
+    if (!g_hKbHook) {
+        keyhook_stop();
+        return false;
+    }
+    return true;
 }
 
 void keyhook_stop(void)

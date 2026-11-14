@@ -1,4 +1,5 @@
 #include "keylogdb.h"
+#include "database.h"
 #include "ksc_private.h"
 #include "sqlite3.h"
 
@@ -17,6 +18,7 @@ static int g_klogCount = 0;
 static int g_klogWrite = 0;
 static int g_klogRead  = 0;
 static CRITICAL_SECTION g_klogCs;
+static bool g_klogCsInit = false;
 static HANDLE g_klogSignal = nullptr;
 static HANDLE g_klogThread = nullptr;
 static volatile bool g_klogRunning = false;
@@ -52,11 +54,9 @@ static DWORD WINAPI klog_writer_thread([[maybe_unused]] LPVOID param)
 
 static void get_klog_path(char *buf, int bufsz)
 {
-    char appdata[MAX_PATH];
-    if (GetEnvironmentVariable("APPDATA", appdata, MAX_PATH) > 0)
-        sprintf(buf, "%s\\KSC\\ksc_keylog.db", appdata);
-    else
-        strcpy(buf, "ksc_keylog.db");
+    char dir[MAX_PATH];
+    db_get_db_dir(dir, sizeof(dir));
+    snprintf(buf, (size_t)bufsz, "%s\\ksc_keylog.db", dir);
 }
 
 int keylog_open(void)
@@ -69,7 +69,10 @@ int keylog_open(void)
     int rc = sqlite3_open_v2(dbpath, &g_klogDb,
         SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX,
         nullptr);
-    if (rc != SQLITE_OK) return 0;
+    if (rc != SQLITE_OK) {
+        if (g_klogDb) { sqlite3_close(g_klogDb); g_klogDb = nullptr; }
+        return 0;
+    }
 
     const char *sql =
         "CREATE TABLE IF NOT EXISTS keylog ("
@@ -93,12 +96,20 @@ int keylog_open(void)
     }
 
     sqlite3_exec(g_klogDb, "PRAGMA journal_mode=WAL;", nullptr, nullptr, nullptr);
+    sqlite3_busy_timeout(g_klogDb, 2000);
 
     InitializeCriticalSection(&g_klogCs);
+    g_klogCsInit = true;
+    g_klogCount = 0;
+    g_klogWrite = 0;
+    g_klogRead = 0;
     g_klogSignal = CreateEvent(nullptr, FALSE, FALSE, nullptr);
     g_klogRunning = true;
     g_klogThread = CreateThread(nullptr, 0, klog_writer_thread,
                                  nullptr, 0, nullptr);
+    if (!g_klogThread) {
+        g_klogRunning = false;
+    }
 
     return 1;
 }
@@ -107,7 +118,7 @@ void keylog_close(void)
 {
     if (g_klogRunning) {
         g_klogRunning = false;
-        SetEvent(g_klogSignal);
+        if (g_klogSignal) SetEvent(g_klogSignal);
         if (g_klogThread) {
             WaitForSingleObject(g_klogThread, INFINITE);
             CloseHandle(g_klogThread);
@@ -118,7 +129,10 @@ void keylog_close(void)
         CloseHandle(g_klogSignal);
         g_klogSignal = nullptr;
     }
-    DeleteCriticalSection(&g_klogCs);
+    if (g_klogCsInit) {
+        DeleteCriticalSection(&g_klogCs);
+        g_klogCsInit = false;
+    }
 
     if (g_klogDb) {
         sqlite3_close(g_klogDb);
@@ -133,9 +147,9 @@ void keylog_insert(const char *key_name, int vk_code, const char *app)
     SYSTEMTIME st;
     GetLocalTime(&st);
     char ts[32];
-    sprintf(ts, "%04d-%02d-%02d %02d:%02d:%02d",
-            st.wYear, st.wMonth, st.wDay,
-            st.wHour, st.wMinute, st.wSecond);
+    snprintf(ts, sizeof(ts), "%04d-%02d-%02d %02d:%02d:%02d",
+             st.wYear, st.wMonth, st.wDay,
+             st.wHour, st.wMinute, st.wSecond);
 
     const char *sql =
         "INSERT INTO keylog (timestamp, key_name, vk_code, app) "
@@ -153,88 +167,167 @@ void keylog_insert(const char *key_name, int vk_code, const char *app)
     sqlite3_finalize(stmt);
 }
 
-int keylog_query(const char *from, const char *to, const char *app,
-                  KeylogEntry **out_entries)
+static sqlite3 *open_temp_klog_if_exists(void)
 {
-    if (!g_klogDb || !out_entries || !from || !to) return 0;
+    char dbpath[MAX_PATH];
+    get_klog_path(dbpath, sizeof(dbpath));
+    DWORD attr = GetFileAttributes(dbpath);
+    if (attr == INVALID_FILE_ATTRIBUTES || (attr & FILE_ATTRIBUTE_DIRECTORY))
+        return nullptr;
+
+    sqlite3 *tmpDb = nullptr;
+    if (sqlite3_open_v2(dbpath, &tmpDb,
+            SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, nullptr) != SQLITE_OK) {
+        if (tmpDb) sqlite3_close(tmpDb);
+        return nullptr;
+    }
+    sqlite3_busy_timeout(tmpDb, 2000);
+    return tmpDb;
+}
+
+int keylog_query_filtered(const char *from, const char *to,
+                          const char *app, const char *search,
+                          KeylogEntry **out_entries)
+{
+    if (out_entries) *out_entries = nullptr;
+    if (!out_entries || !from || !to) return 0;
+
+    sqlite3 *db = g_klogDb;
+    sqlite3 *tempDb = nullptr;
+    if (!db) {
+        tempDb = open_temp_klog_if_exists();
+        db = tempDb;
+    }
+    if (!db) return 0;
 
     const char *appFilter = (app && app[0]) ? app : "";
+    const char *searchFilter = (search && search[0]) ? search : "";
     const char *sql =
         "SELECT id, timestamp, key_name, vk_code, app "
         "FROM keylog "
         "WHERE timestamp >= ?1 AND timestamp <= (?2 || ' 23:59:59') "
         "AND (?3 = '' OR app = ?3) "
-        "ORDER BY timestamp DESC;";
+        "AND (?4 = '' OR key_name LIKE ('%' || ?4 || '%') "
+        "     OR app LIKE ('%' || ?4 || '%')) "
+        "ORDER BY timestamp DESC, id DESC;";
 
     sqlite3_stmt *stmt = nullptr;
-    if (sqlite3_prepare_v2(g_klogDb, sql, -1, &stmt, nullptr) != SQLITE_OK)
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        if (tempDb) sqlite3_close(tempDb);
         return 0;
+    }
 
     sqlite3_bind_text(stmt, 1, from, -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 2, to, -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 3, appFilter, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 4, searchFilter, -1, SQLITE_STATIC);
 
     int cap = 64, cnt = 0;
     KeylogEntry *entries = malloc(sizeof(KeylogEntry) * cap);
-    if (!entries) { sqlite3_finalize(stmt); return 0; }
+    if (!entries) {
+        sqlite3_finalize(stmt);
+        if (tempDb) sqlite3_close(tempDb);
+        return 0;
+    }
 
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         if (cnt >= cap) {
             cap *= 2;
             KeylogEntry *tmp = realloc(entries, sizeof(KeylogEntry) * cap);
-            if (!tmp) { free(entries); sqlite3_finalize(stmt); return 0; }
+            if (!tmp) {
+                free(entries);
+                sqlite3_finalize(stmt);
+                if (tempDb) sqlite3_close(tempDb);
+                return 0;
+            }
             entries = tmp;
         }
         entries[cnt].id = sqlite3_column_int(stmt, 0);
-        strncpy(entries[cnt].timestamp,
-                (const char *)sqlite3_column_text(stmt, 1), 31);
+        const char *tsText = (const char *)sqlite3_column_text(stmt, 1);
+        if (tsText) strncpy(entries[cnt].timestamp, tsText, 31);
+        else entries[cnt].timestamp[0] = '\0';
         entries[cnt].timestamp[31] = '\0';
-        strncpy(entries[cnt].key_name,
-                (const char *)sqlite3_column_text(stmt, 2), 63);
+
+        const char *knText = (const char *)sqlite3_column_text(stmt, 2);
+        if (knText) strncpy(entries[cnt].key_name, knText, 63);
+        else entries[cnt].key_name[0] = '\0';
         entries[cnt].key_name[63] = '\0';
+
         entries[cnt].vk_code = sqlite3_column_int(stmt, 3);
-        {
-            const char *ap = (const char *)sqlite3_column_text(stmt, 4);
-            if (ap) strncpy(entries[cnt].app, ap, 255);
-            else entries[cnt].app[0] = '\0';
-            entries[cnt].app[255] = '\0';
-        }
+        const char *ap = (const char *)sqlite3_column_text(stmt, 4);
+        if (ap) strncpy(entries[cnt].app, ap, 255);
+        else entries[cnt].app[0] = '\0';
+        entries[cnt].app[255] = '\0';
         cnt++;
     }
     sqlite3_finalize(stmt);
+    if (tempDb) sqlite3_close(tempDb);
+
+    if (cnt == 0) {
+        free(entries);
+        return 0;
+    }
     *out_entries = entries;
     return cnt;
 }
 
+int keylog_query(const char *from, const char *to, const char *app,
+                  KeylogEntry **out_entries)
+{
+    return keylog_query_filtered(from, to, app, nullptr, out_entries);
+}
+
 int keylog_get_apps(char ***out_apps, int *out_count)
 {
-    if (!g_klogDb || !out_apps || !out_count) return 0;
+    if (out_apps) *out_apps = nullptr;
+    if (out_count) *out_count = 0;
+    if (!out_apps || !out_count) return 0;
+
+    sqlite3 *db = g_klogDb;
+    sqlite3 *tempDb = nullptr;
+    if (!db) {
+        tempDb = open_temp_klog_if_exists();
+        db = tempDb;
+    }
+    if (!db) return 0;
 
     const char *sql =
         "SELECT DISTINCT app FROM keylog WHERE app != '' ORDER BY app ASC;";
     sqlite3_stmt *stmt = nullptr;
-    if (sqlite3_prepare_v2(g_klogDb, sql, -1, &stmt, nullptr) != SQLITE_OK)
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        if (tempDb) sqlite3_close(tempDb);
         return 0;
+    }
 
     int cap = 16, cnt = 0;
     char **apps = malloc(sizeof(char *) * cap);
-    if (!apps) { sqlite3_finalize(stmt); return 0; }
+    if (!apps) {
+        sqlite3_finalize(stmt);
+        if (tempDb) sqlite3_close(tempDb);
+        return 0;
+    }
 
     while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char *name = (const char *)sqlite3_column_text(stmt, 0);
+        if (!name || !name[0]) continue;
         if (cnt >= cap) {
             cap *= 2;
             char **tmp = realloc(apps, sizeof(char *) * cap);
             if (!tmp) {
                 for (int i = 0; i < cnt; i++) free(apps[i]);
-                free(apps); sqlite3_finalize(stmt); return 0;
+                free(apps);
+                sqlite3_finalize(stmt);
+                if (tempDb) sqlite3_close(tempDb);
+                return 0;
             }
             apps = tmp;
         }
-        const char *name = (const char *)sqlite3_column_text(stmt, 0);
-        apps[cnt] = name ? _strdup(name) : nullptr;
-        cnt++;
+        apps[cnt] = _strdup(name);
+        if (apps[cnt]) cnt++;
     }
     sqlite3_finalize(stmt);
+    if (tempDb) sqlite3_close(tempDb);
+
     *out_apps = apps;
     *out_count = cnt;
     return 1;
@@ -256,8 +349,13 @@ void keylog_delete_db(void)
 {
     keylog_close();
     char dbpath[MAX_PATH];
+    char aux[MAX_PATH];
     get_klog_path(dbpath, sizeof(dbpath));
     DeleteFile(dbpath);
+    snprintf(aux, sizeof(aux), "%s-wal", dbpath);
+    DeleteFile(aux);
+    snprintf(aux, sizeof(aux), "%s-shm", dbpath);
+    DeleteFile(aux);
 }
 
 bool keylog_is_open(void)
@@ -268,6 +366,7 @@ bool keylog_is_open(void)
 void keylog_queue_event(const char *key_name, int vk_code,
                          const char *app)
 {
+    if (!g_klogCsInit || !g_klogRunning) return;
     EnterCriticalSection(&g_klogCs);
     if (g_klogCount < KLOG_BUF_SIZE) {
         KlogEvent *e = &g_klogBuf[g_klogWrite];
@@ -283,13 +382,56 @@ void keylog_queue_event(const char *key_name, int vk_code,
         g_klogCount++;
     }
     LeaveCriticalSection(&g_klogCs);
-    SetEvent(g_klogSignal);
+    if (g_klogSignal) SetEvent(g_klogSignal);
 }
 
 void keylog_flush_events(void)
 {
-    if (!g_klogSignal) return;
+    if (!g_klogCsInit || !g_klogSignal) return;
     EnterCriticalSection(&g_klogCs);
     keylog_drain_events_locked();
     LeaveCriticalSection(&g_klogCs);
+}
+
+int keylog_backup_safe(const char *destPath)
+{
+    if (!destPath) return 0;
+
+    keylog_flush_events();
+
+    sqlite3 *srcDb = g_klogDb;
+    sqlite3 *tempDb = nullptr;
+    if (!srcDb) {
+        tempDb = open_temp_klog_if_exists();
+        srcDb = tempDb;
+    }
+    if (!srcDb) return 0;
+
+    sqlite3 *backupDb = nullptr;
+    int rc = sqlite3_open_v2(destPath, &backupDb,
+        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr);
+    if (rc != SQLITE_OK) {
+        if (backupDb) sqlite3_close(backupDb);
+        if (tempDb) sqlite3_close(tempDb);
+        return 0;
+    }
+
+    sqlite3_backup *bk = sqlite3_backup_init(backupDb, "main", srcDb, "main");
+    if (!bk) {
+        sqlite3_close(backupDb);
+        if (tempDb) sqlite3_close(tempDb);
+        return 0;
+    }
+
+    do {
+        rc = sqlite3_backup_step(bk, -1);
+        if (rc == SQLITE_BUSY || rc == SQLITE_LOCKED)
+            Sleep(10);
+    } while (rc == SQLITE_OK || rc == SQLITE_BUSY || rc == SQLITE_LOCKED);
+
+    sqlite3_backup_finish(bk);
+    sqlite3_close(backupDb);
+    if (tempDb) sqlite3_close(tempDb);
+
+    return (rc == SQLITE_DONE) ? 1 : 0;
 }

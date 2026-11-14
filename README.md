@@ -22,24 +22,25 @@
 ## ✨ Features
 
 ### ⌨️ Core Tracking
-- **Keystroke & mouse counting** — Low-level hooks (`WH_KEYBOARD_LL` + `WH_MOUSE_LL`) capture every keypress and left/right click system‑wide
+- **Keystroke & mouse counting** — Low-level hooks (`WH_KEYBOARD_LL` + `WH_MOUSE_LL`) capture every keypress and left/middle/right/X1/X2 mouse clicks system‑wide (excluding app‑injected simulator/clicker input)
 - **Per‑app tracking** — Records which foreground window received each event
-- **Live totals** — Keyboard keypresses vs mouse clicks, separated and auto‑updating
+- **Live totals & typing speed** — Total keyboard vs mouse clicks, Today's count, and rolling live WPM / session Peak WPM in the status bar and tray tooltip
 - **Batch writes** — Ring buffer + writer threads flush in `BEGIN/COMMIT` transactions per ~100ms
 
 ### 🪟 Windows & Views
-- **Keyboard heatmap** — Full QWERTY + numpad + arrow keys colored by usage frequency (blue → red gradient), tooltips on hover, per‑app filter, double‑buffered rendering
-- **Statistics** — Custom date range pickers, app filter, keyboard/mouse separated totals, 10s auto‑refresh, CSV export
-- **Keylogger** — Timestamped per‑key recording to a separate `ksc_keylog.db`; dedicated viewer window with date + app filters
+- **Keyboard heatmap** — Full QWERTY + numpad + arrow keys + 5 mouse buttons (`LMB`, `MMB`, `RMB`, `M4`, `M5`) colored by usage frequency (blue → red gradient), hover readout panel, per‑app and time‑period filters (`All Time`, `Today`, `Last 7 Days`, `Last 30 Days`), double‑buffered rendering
+- **Statistics** — Custom date range pickers, app filter, keyboard/mouse separated totals, sortable columns, 10s auto‑refresh, properly escaped CSV export
+- **Keylogger** — Timestamped per‑key recording to a separate `ksc_keylog.db`; dedicated viewer window with date, app, and live keyword search filters, sortable columns, entry counter, and CSV export
 - **Mouse clicker** — Configurable click interval (min/sec/ms), random offset, left/right button, continuous/limited mode, system‑wide start/stop hotkeys
-- **Keyboard simulator** — Record key combo sequences, replay with interval + random offset, system‑wide start/stop hotkeys
+- **Keyboard simulator** — Record up to 128 key combo sequences, replay with interval + random offset, system‑wide start/stop hotkeys
 
 ### ☁️ Cloud Backup
-- **Google Drive** — OAuth2 login via browser, `ksc-backups` folder auto‑created in Drive root, DPAPI‑encrypted token storage
+- **Google Drive** — OAuth2 with PKCE login via browser, `ksc-backups` folder auto‑created in Drive root, DPAPI‑encrypted token storage
 - **SSH / SFTP** — libssh2 with OpenSSL backend, uploads to `~/ksc-backups`, password encrypted with DPAPI
+- **Switchable ZIP compression** — Optional checkbox to compress each database into a separate `.zip` archive before uploading
 - **Scheduler** — Off / 5 min / 15 min / 30 min / 1 h / 12 h / daily
 - **Multi‑target** — Backups go to Drive, SSH, or both; local files deleted only after ALL targets succeed
-- **Safe online backup** — Uses `sqlite3_backup_init()` API (WAL‑safe) instead of raw file copy
+- **Safe online backup** — Uses `sqlite3_backup_init()` API (WAL‑safe) for both main and keylogger databases
 - **WAL mode** — SQLite journal mode enabled for concurrent reads during writes
 
 ### 🔔 Notifications
@@ -54,16 +55,17 @@
 - **Start with Windows** — Registry Run key toggle
 
 ### 🛠️ Data Management
-- **Safe backup & restore** — Online `.db` backup with `sqlite3_backup_init()`; one‑click restore
-- **CSV export** — All‑time or date‑filtered, with per‑app breakdown
+- **Safe backup & restore** — Online backup via Save dialog (`.zip` or `.db` for both main and companion keylogger DB); one‑click restore from `.db` or `.zip`
+- **Portable mode** — Pass `--portable` or place an empty `portable.txt` next to `ksc.exe` to store databases in a local `data\` folder instead of `%APPDATA%\KSC`
+- **CSV export** — All‑time, date‑filtered, or keylogger search‑filtered CSV export
 - **Reset statistics** — Wipe counts, keep settings
-- **Single instance** — Named mutex prevents duplicate processes
+- **Single instance** — Named mutex prevents duplicate processes and focuses the running window
 
 ### 🔐 Build & Distribution
 - **Static linking** — Standalone `.exe` (zero DLL dependencies)
 - **Self‑signed Authenticode** — Code‑signed with timestamp at build time; one‑time trust command eliminates SmartScreen
 - **VERSIONINFO** — File properties show version `1.1`, company `bbounce.org`
-- **5,200+ lines of hand‑written C11** — No frameworks, no external UI libs
+- **Hand‑written C23** — No frameworks, no external UI libs
 
 ---
 
@@ -112,12 +114,13 @@ Import-Certificate -FilePath .\ksc.cer -CertStoreLocation Cert:\CurrentUser\Trus
 
 | Layer | Choice |
 |---|---|
-| Language | C11 |
+| Language | C23 (`-std=c23`) |
 | Compiler | GCC (MinGW‑w64) |
 | Build | CMake |
 | Database | SQLite3 (amalgamation, WAL mode) |
 | HTTP | WinHTTP |
 | SSH | libssh2 + OpenSSL |
+| Compression | zlib (PKZIP `.zip` archives) |
 | Crypto | DPAPI, CryptGenRandom, BCrypt |
 | UI | Win32 API |
 | Linking | Fully static |
@@ -127,8 +130,6 @@ Import-Certificate -FilePath .\ksc.cer -CertStoreLocation Cert:\CurrentUser\Trus
 ## 🗺️ Future Plans
 
 - Idle detection & session tracking
-- Portable mode (store DBs alongside `.exe`)
-- Typing speed display (live WPM)
 - Linux support (X11/Wayland)
 
 ---

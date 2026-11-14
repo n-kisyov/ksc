@@ -10,6 +10,9 @@ typedef struct {
     int64_t count;
 } KeyStat;
 
+void db_set_portable_mode(bool portable);
+[[nodiscard]] bool db_is_portable_mode(void);
+
 [[nodiscard]] int db_init(void);
 void db_close(void);
 void db_increment_key(int key_code, const char *key_name, const char *app);
@@ -31,6 +34,6 @@ void db_flush_events(void);
 void db_reset_stats(void);
 [[nodiscard]] int64_t db_get_today_count(void);
 void db_get_db_dir(char *buf, int bufsize);
-[[nodiscard]] int  db_backup_safe(const char *destPath);
+[[nodiscard]] int db_backup_safe(const char *destPath);
 
 #endif

@@ -19,6 +19,8 @@ void cloudsync_backup_trigger(HWND hCloudWnd);
 void cloudsync_free_history(CloudSyncEntry *e);
 [[nodiscard]] int  cloudsync_get_schedule(void);
 void cloudsync_set_schedule(int value);
+[[nodiscard]] int  cloudsync_get_compress(void);
+void cloudsync_set_compress(int value);
 void cloudsync_init(void);
 
 #endif

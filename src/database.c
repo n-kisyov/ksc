@@ -17,9 +17,66 @@ static int g_eventCount = 0;
 static int g_eventWrite = 0;
 static int g_eventRead  = 0;
 static CRITICAL_SECTION g_eventCs;
+static bool g_csInitialized = false;
 static HANDLE g_eventSignal = nullptr;
 static HANDLE g_writerThread = nullptr;
 static volatile bool g_writerRunning = false;
+static bool g_portableOverride = false;
+
+void db_set_portable_mode(bool portable)
+{
+    g_portableOverride = portable;
+}
+
+bool db_is_portable_mode(void)
+{
+    if (g_portableOverride) return true;
+
+    char exePath[MAX_PATH];
+    DWORD len = GetModuleFileName(nullptr, exePath, MAX_PATH);
+    if (len > 0 && len < MAX_PATH) {
+        char *slash = strrchr(exePath, '\\');
+        if (slash) {
+            *(slash + 1) = '\0';
+            char marker[MAX_PATH];
+            int n = snprintf(marker, sizeof(marker), "%sportable.txt", exePath);
+            if (n > 0 && n < (int)sizeof(marker)) {
+                DWORD attr = GetFileAttributes(marker);
+                if (attr != INVALID_FILE_ATTRIBUTES &&
+                    !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+void db_get_db_dir(char *buf, int bufsize)
+{
+    if (!buf || bufsize <= 0) return;
+
+    if (db_is_portable_mode()) {
+        char exePath[MAX_PATH];
+        DWORD len = GetModuleFileName(nullptr, exePath, MAX_PATH);
+        if (len > 0 && len < MAX_PATH) {
+            char *slash = strrchr(exePath, '\\');
+            if (slash) {
+                *slash = '\0';
+                snprintf(buf, (size_t)bufsize, "%s", exePath);
+                return;
+            }
+        }
+    }
+
+    char appdata[MAX_PATH];
+    if (GetEnvironmentVariable("APPDATA", appdata, MAX_PATH) > 0) {
+        snprintf(buf, (size_t)bufsize, "%s\\KSC", appdata);
+        CreateDirectory(buf, nullptr);
+    } else {
+        snprintf(buf, (size_t)bufsize, ".");
+    }
+}
 
 static void db_drain_events_locked(void)
 {
@@ -51,53 +108,30 @@ static DWORD WINAPI db_writer_thread([[maybe_unused]] LPVOID param)
     return 0;
 }
 
-static void get_today_date(char *buf, [[maybe_unused]] int bufsize)
+static void get_today_date(char *buf, int bufsize)
 {
     SYSTEMTIME st;
     GetLocalTime(&st);
-    sprintf(buf, "%04d-%02d-%02d", st.wYear, st.wMonth, st.wDay);
-}
-
-static void get_cutoff_date(char *buf, [[maybe_unused]] int bufsize, int days_back)
-{
-    FILETIME ft;
-    GetSystemTimeAsFileTime(&ft);
-    ULARGE_INTEGER uli;
-    uli.LowPart = ft.dwLowDateTime;
-    uli.HighPart = ft.dwHighDateTime;
-    uli.QuadPart -= (ULONGLONG)days_back * 24ULL * 60ULL * 60ULL * 10000000ULL;
-    ft.dwLowDateTime = uli.LowPart;
-    ft.dwHighDateTime = uli.HighPart;
-    SYSTEMTIME st;
-    FileTimeToSystemTime(&ft, &st);
-    sprintf(buf, "%04d-%02d-%02d", st.wYear, st.wMonth, st.wDay);
-}
-
-static void ensure_db_dir(void)
-{
-    char appdata[MAX_PATH];
-    if (GetEnvironmentVariable("APPDATA", appdata, MAX_PATH) > 0) {
-        char dir[MAX_PATH];
-        sprintf(dir, "%s\\KSC", appdata);
-        CreateDirectory(dir, nullptr);
-    }
+    snprintf(buf, (size_t)bufsize, "%04d-%02d-%02d",
+             st.wYear, st.wMonth, st.wDay);
 }
 
 int db_init(void)
 {
-    ensure_db_dir();
+    if (g_db) return 1;
+
+    char dir[MAX_PATH];
+    db_get_db_dir(dir, sizeof(dir));
 
     char db_path[MAX_PATH];
-    char appdata[MAX_PATH];
-    if (GetEnvironmentVariable("APPDATA", appdata, MAX_PATH) > 0) {
-        sprintf(db_path, "%s\\KSC\\ksc.db", appdata);
-    } else {
-        strcpy(db_path, "ksc.db");
-    }
+    snprintf(db_path, sizeof(db_path), "%s\\ksc.db", dir);
 
     int rc = sqlite3_open_v2(db_path, &g_db,
         SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nullptr);
-    if (rc != SQLITE_OK) return 0;
+    if (rc != SQLITE_OK) {
+        if (g_db) { sqlite3_close(g_db); g_db = nullptr; }
+        return 0;
+    }
 
     const char *sql =
         "CREATE TABLE IF NOT EXISTS key_counts ("
@@ -123,16 +157,26 @@ int db_init(void)
     rc = sqlite3_exec(g_db, sql, nullptr, nullptr, &err);
     if (rc != SQLITE_OK) {
         sqlite3_free(err);
+        sqlite3_close(g_db);
+        g_db = nullptr;
         return 0;
     }
 
     sqlite3_exec(g_db, "PRAGMA journal_mode=WAL;", nullptr, nullptr, nullptr);
+    sqlite3_busy_timeout(g_db, 2000);
 
     InitializeCriticalSection(&g_eventCs);
+    g_csInitialized = true;
+    g_eventCount = 0;
+    g_eventWrite = 0;
+    g_eventRead = 0;
     g_eventSignal = CreateEvent(nullptr, FALSE, FALSE, nullptr);
     g_writerRunning = true;
     g_writerThread = CreateThread(nullptr, 0, db_writer_thread,
                                    nullptr, 0, nullptr);
+    if (!g_writerThread) {
+        g_writerRunning = false;
+    }
 
     return 1;
 }
@@ -141,7 +185,7 @@ void db_close(void)
 {
     if (g_writerRunning) {
         g_writerRunning = false;
-        SetEvent(g_eventSignal);
+        if (g_eventSignal) SetEvent(g_eventSignal);
         if (g_writerThread) {
             WaitForSingleObject(g_writerThread, INFINITE);
             CloseHandle(g_writerThread);
@@ -152,7 +196,10 @@ void db_close(void)
         CloseHandle(g_eventSignal);
         g_eventSignal = nullptr;
     }
-    DeleteCriticalSection(&g_eventCs);
+    if (g_csInitialized) {
+        DeleteCriticalSection(&g_eventCs);
+        g_csInitialized = false;
+    }
 
     if (g_db) {
         sqlite3_close(g_db);
@@ -199,6 +246,7 @@ void db_increment_key(int key_code, const char *key_name, const char *app)
 
 int db_get_stats(KeyStat **out_stats)
 {
+    if (out_stats) *out_stats = nullptr;
     if (!g_db || !out_stats) return 0;
 
     const char *sql =
@@ -228,8 +276,12 @@ int db_get_stats(KeyStat **out_stats)
         }
 
         stats[count].key_code = sqlite3_column_int(stmt, 0);
-        strncpy(stats[count].key_name,
-                (const char *)sqlite3_column_text(stmt, 1), 63);
+        const char *kname = (const char *)sqlite3_column_text(stmt, 1);
+        if (kname) {
+            strncpy(stats[count].key_name, kname, 63);
+        } else {
+            snprintf(stats[count].key_name, 64, "Key 0x%02X", stats[count].key_code);
+        }
         stats[count].key_name[63] = '\0';
         stats[count].app[0] = '\0';
         stats[count].count = sqlite3_column_int64(stmt, 2);
@@ -237,6 +289,10 @@ int db_get_stats(KeyStat **out_stats)
     }
 
     sqlite3_finalize(stmt);
+    if (count == 0) {
+        free(stats);
+        return 0;
+    }
     *out_stats = stats;
     return count;
 }
@@ -250,6 +306,7 @@ int db_get_date_range_stats(const char *from, const char *to,
                              const char *app, int detailed,
                              KeyStat **out_stats)
 {
+    if (out_stats) *out_stats = nullptr;
     if (!g_db || !out_stats || !from || !to) return 0;
 
     const char *appFilter = (app && app[0]) ? app : "";
@@ -307,9 +364,7 @@ int db_get_date_range_stats(const char *from, const char *to,
         if (name) {
             strncpy(stats[count].key_name, name, 63);
         } else {
-            char buf[16];
-            sprintf(buf, "Key 0x%02X", stats[count].key_code);
-            strncpy(stats[count].key_name, buf, 63);
+            snprintf(stats[count].key_name, 64, "Key 0x%02X", stats[count].key_code);
         }
         stats[count].key_name[63] = '\0';
         {
@@ -326,12 +381,18 @@ int db_get_date_range_stats(const char *from, const char *to,
     }
 
     sqlite3_finalize(stmt);
+    if (count == 0) {
+        free(stats);
+        return 0;
+    }
     *out_stats = stats;
     return count;
 }
 
 int db_get_distinct_apps(char ***out_apps, int *out_count)
 {
+    if (out_apps) *out_apps = nullptr;
+    if (out_count) *out_count = 0;
     if (!g_db || !out_apps || !out_count) return 0;
 
     const char *sql =
@@ -345,6 +406,8 @@ int db_get_distinct_apps(char ***out_apps, int *out_count)
     if (!apps) { sqlite3_finalize(stmt); return 0; }
 
     while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char *name = (const char *)sqlite3_column_text(stmt, 0);
+        if (!name || !name[0]) continue;
         if (cnt >= cap) {
             cap *= 2;
             char **tmp = realloc(apps, sizeof(char *) * cap);
@@ -356,9 +419,8 @@ int db_get_distinct_apps(char ***out_apps, int *out_count)
             }
             apps = tmp;
         }
-        const char *name = (const char *)sqlite3_column_text(stmt, 0);
-        apps[cnt] = name ? _strdup(name) : nullptr;
-        cnt++;
+        apps[cnt] = _strdup(name);
+        if (apps[cnt]) cnt++;
     }
     sqlite3_finalize(stmt);
     *out_apps = apps;
@@ -397,7 +459,7 @@ void db_set_setting_int(const char *key, int value)
     if (!g_db) return;
 
     char buf[32];
-    sprintf(buf, "%d", value);
+    snprintf(buf, sizeof(buf), "%d", value);
 
     const char *sql =
         "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2);";
@@ -413,6 +475,7 @@ void db_set_setting_int(const char *key, int value)
 void db_get_setting_str(const char *key, const char *default_val,
                          char *out, int out_size)
 {
+    if (!out || out_size <= 0) return;
     if (!g_db) {
         if (default_val) strncpy(out, default_val, out_size - 1);
         else out[0] = '\0';
@@ -453,13 +516,14 @@ void db_set_setting_str(const char *key, const char *value)
     if (sqlite3_prepare_v2(g_db, sql, -1, &stmt, nullptr) != SQLITE_OK) return;
 
     sqlite3_bind_text(stmt, 1, key, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 2, value, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, value ? value : "", -1, SQLITE_STATIC);
     sqlite3_step(stmt);
     sqlite3_finalize(stmt);
 }
 
 void db_queue_event(int key_code, const char *key_name, const char *app)
 {
+    if (!g_csInitialized || !g_writerRunning) return;
     EnterCriticalSection(&g_eventCs);
     if (g_eventCount < EVENT_BUF_SIZE) {
         KeyEvent *e = &g_eventBuf[g_eventWrite];
@@ -475,12 +539,12 @@ void db_queue_event(int key_code, const char *key_name, const char *app)
         g_eventCount++;
     }
     LeaveCriticalSection(&g_eventCs);
-    SetEvent(g_eventSignal);
+    if (g_eventSignal) SetEvent(g_eventSignal);
 }
 
 void db_flush_events(void)
 {
-    if (!g_eventSignal) return;
+    if (!g_csInitialized || !g_eventSignal) return;
     EnterCriticalSection(&g_eventCs);
     db_drain_events_locked();
     LeaveCriticalSection(&g_eventCs);
@@ -489,23 +553,29 @@ void db_flush_events(void)
 void db_reset_stats(void)
 {
     if (!g_db) return;
-    sqlite3_exec(g_db,
-        "DELETE FROM key_counts; DELETE FROM key_daily;",
-        nullptr, nullptr, nullptr);
+    if (g_csInitialized) {
+        EnterCriticalSection(&g_eventCs);
+        g_eventCount = 0;
+        g_eventWrite = 0;
+        g_eventRead = 0;
+        sqlite3_exec(g_db,
+            "DELETE FROM key_counts; DELETE FROM key_daily;",
+            nullptr, nullptr, nullptr);
+        LeaveCriticalSection(&g_eventCs);
+    } else {
+        sqlite3_exec(g_db,
+            "DELETE FROM key_counts; DELETE FROM key_daily;",
+            nullptr, nullptr, nullptr);
+    }
 }
 
 int64_t db_get_today_count(void)
 {
     if (!g_db) return 0;
     char today[16];
-    {
-        SYSTEMTIME st;
-        GetLocalTime(&st);
-        sprintf(today, "%04d-%02d-%02d",
-                st.wYear, st.wMonth, st.wDay);
-    }
+    get_today_date(today, sizeof(today));
     const char *sql =
-        "SELECT SUM(count) FROM key_daily WHERE date = ?1;";
+        "SELECT COALESCE(SUM(count), 0) FROM key_daily WHERE date = ?1;";
     sqlite3_stmt *stmt = nullptr;
     if (sqlite3_prepare_v2(g_db, sql, -1, &stmt, nullptr) != SQLITE_OK)
         return 0;
@@ -517,32 +587,30 @@ int64_t db_get_today_count(void)
     return total;
 }
 
-void db_get_db_dir(char *buf, [[maybe_unused]] int bufsize)
-{
-    char appdata[MAX_PATH];
-    if (GetEnvironmentVariable("APPDATA", appdata, MAX_PATH) > 0)
-        sprintf(buf, "%s\\KSC", appdata);
-    else
-        strcpy(buf, ".");
-}
-
 int db_backup_safe(const char *destPath)
 {
     sqlite3 *backupDb = nullptr;
     sqlite3_backup *bk = nullptr;
     int rc;
 
-    if (!g_db) return 0;
+    if (!g_db || !destPath) return 0;
+
+    db_flush_events();
 
     rc = sqlite3_open_v2(destPath, &backupDb,
         SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr);
-    if (rc != SQLITE_OK) return 0;
+    if (rc != SQLITE_OK) {
+        if (backupDb) sqlite3_close(backupDb);
+        return 0;
+    }
 
     bk = sqlite3_backup_init(backupDb, "main", g_db, "main");
     if (!bk) { sqlite3_close(backupDb); return 0; }
 
     do {
         rc = sqlite3_backup_step(bk, -1);
+        if (rc == SQLITE_BUSY || rc == SQLITE_LOCKED)
+            Sleep(10);
     } while (rc == SQLITE_OK || rc == SQLITE_BUSY || rc == SQLITE_LOCKED);
 
     sqlite3_backup_finish(bk);

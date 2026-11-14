@@ -1,7 +1,9 @@
 #ifndef KSC_PRIVATE_H
 #define KSC_PRIVATE_H
 
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 #ifndef _WIN32_WINNT
 #define _WIN32_WINNT 0x0601
 #endif
@@ -130,6 +132,13 @@ constexpr int TRAY_ID = 1;
 #define IDC_TELEGRAM_FAILURES    2074
 #define IDC_TELEGRAM_TEST        2075
 #define IDC_TELEGRAM_SAVE        2076
+#define IDC_CLOUD_COMPRESS_CHK   2077
+#define IDC_HEATMAP_PERIOD_COMBO 2078
+#define IDC_LOGS_SEARCH_EDIT     2079
+#define IDC_LOGS_EXPORT_BTN      2080
+#define IDC_LOGS_COUNT_LBL       2081
+
+constexpr ULONG_PTR KSC_INJECTED_MAGIC = 0x4B534331ULL;
 
 constexpr int HOTKEY_ID_START_CLICK = 100;
 constexpr int HOTKEY_ID_STOP_CLICK  = 101;

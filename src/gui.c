@@ -8,6 +8,7 @@
 #include "cloudsync.h"
 #include "ssh_sync.h"
 #include "telegram.h"
+#include "zip_util.h"
 #include "resource.h"
 
 static HINSTANCE g_hInst = nullptr;
@@ -29,6 +30,189 @@ typedef void (WINAPI *fnFlushMenuThemes)(void);
 static fnSetPreferredAppMode    g_pSetPreferredAppMode = nullptr;
 static fnAllowDarkModeForWindow g_pAllowDarkModeForWindow = nullptr;
 static fnFlushMenuThemes        g_pFlushMenuThemes = nullptr;
+
+typedef struct {
+    int sortCol;
+    bool sortAsc;
+    bool userSorted;
+} ListViewSortState;
+
+typedef struct {
+    HWND hLv;
+    int col;
+    bool asc;
+    bool numeric;
+} LvSortCtx;
+
+static int CALLBACK listview_compare_proc(LPARAM lParam1, LPARAM lParam2,
+                                          LPARAM lParamSort)
+{
+    const LvSortCtx *ctx = (const LvSortCtx *)lParamSort;
+    char b1[260] = "", b2[260] = "";
+    ListView_GetItemText(ctx->hLv, (int)lParam1, ctx->col, b1, sizeof(b1));
+    ListView_GetItemText(ctx->hLv, (int)lParam2, ctx->col, b2, sizeof(b2));
+
+    int cmp = 0;
+    if (ctx->numeric) {
+        long long v1 = _strtoi64(b1, nullptr, 10);
+        long long v2 = _strtoi64(b2, nullptr, 10);
+        cmp = (v1 < v2) ? -1 : (v1 > v2 ? 1 : 0);
+    } else {
+        cmp = _stricmp(b1, b2);
+    }
+    return ctx->asc ? cmp : -cmp;
+}
+
+static void listview_apply_sort(HWND hLv, const ListViewSortState *st,
+                                bool isNumericCol)
+{
+    if (!hLv || !st || !st->userSorted) return;
+    LvSortCtx ctx = {
+        .hLv = hLv,
+        .col = st->sortCol,
+        .asc = st->sortAsc,
+        .numeric = isNumericCol
+    };
+    ListView_SortItemsEx(hLv, listview_compare_proc, (LPARAM)&ctx);
+}
+
+static void listview_toggle_sort(HWND hLv, ListViewSortState *st,
+                                 int col, bool isNumericCol)
+{
+    if (!hLv || !st) return;
+    if (st->userSorted && st->sortCol == col) {
+        st->sortAsc = !st->sortAsc;
+    } else {
+        st->sortCol = col;
+        st->sortAsc = !isNumericCol;
+        st->userSorted = true;
+    }
+    listview_apply_sort(hLv, st, isNumericCol);
+}
+
+static bool focus_existing_window(const char *className)
+{
+    HWND existing = FindWindow(className, nullptr);
+    if (!existing) return false;
+    if (!IsWindowVisible(existing) || IsIconic(existing))
+        ShowWindow(existing, SW_RESTORE);
+    SetForegroundWindow(existing);
+    return true;
+}
+
+static void get_date_days_ago(int days_back, SYSTEMTIME *outSt)
+{
+    SYSTEMTIME now;
+    GetLocalTime(&now);
+    FILETIME ft = {};
+    if (SystemTimeToFileTime(&now, &ft)) {
+        ULARGE_INTEGER uli;
+        uli.LowPart = ft.dwLowDateTime;
+        uli.HighPart = ft.dwHighDateTime;
+        ULONGLONG delta = (ULONGLONG)days_back * 24ULL * 60ULL * 60ULL * 10000000ULL;
+        if (uli.QuadPart > delta) uli.QuadPart -= delta;
+        ft.dwLowDateTime = uli.LowPart;
+        ft.dwHighDateTime = uli.HighPart;
+        if (FileTimeToSystemTime(&ft, outSt)) return;
+    }
+    *outSt = now;
+}
+
+static void format_date_str(const SYSTEMTIME *st, char *buf, size_t sz)
+{
+    snprintf(buf, sz, "%04d-%02d-%02d", st->wYear, st->wMonth, st->wDay);
+}
+
+static void write_csv_escaped(FILE *f, const char *s)
+{
+    fputc('"', f);
+    if (s) {
+        for (const char *p = s; *p; p++) {
+            if (*p == '"') fputc('"', f);
+            fputc(*p, f);
+        }
+    }
+    fputc('"', f);
+}
+
+static bool handle_dark_erasebkgnd(HWND hWnd, HDC hdc)
+{
+    BOOL dark = db_get_setting_int("dark_mode", 0);
+    if (dark && g_hDarkBrush) {
+        RECT rc;
+        GetClientRect(hWnd, &rc);
+        FillRect(hdc, &rc, g_hDarkBrush);
+        return true;
+    }
+    return false;
+}
+
+static LRESULT handle_dark_ctlcolor(HWND hWnd, UINT msg,
+                                      WPARAM wParam, LPARAM lParam)
+{
+    BOOL dark = db_get_setting_int("dark_mode", 0);
+    if (dark && g_hDarkBrush) {
+        HDC hdc = (HDC)wParam;
+        SetTextColor(hdc, RGB(230, 230, 230));
+        if (msg == WM_CTLCOLOREDIT || msg == WM_CTLCOLORLISTBOX) {
+            SetBkMode(hdc, OPAQUE);
+            SetBkColor(hdc, RGB(37, 37, 38));
+            return (LRESULT)(g_hLvBrush ? g_hLvBrush : g_hDarkBrush);
+        }
+        SetBkMode(hdc, TRANSPARENT);
+        return (LRESULT)g_hDarkBrush;
+    }
+    return DefWindowProc(hWnd, msg, wParam, lParam);
+}
+
+static void apply_listview_theme(HWND hWnd, HWND hListView)
+{
+    BOOL dark = db_get_setting_int("dark_mode", 0);
+    BOOL useDark = dark ? TRUE : FALSE;
+    DwmSetWindowAttribute(hWnd, DWMWA_USE_IMMERSIVE_DARK_MODE,
+                          &useDark, sizeof(useDark));
+    if (g_pAllowDarkModeForWindow) {
+        g_pAllowDarkModeForWindow(hWnd, useDark);
+        if (hListView) g_pAllowDarkModeForWindow(hListView, useDark);
+    }
+    if (hListView) {
+        SetWindowTheme(hListView, dark ? L"DarkMode_Explorer" : L"Explorer", nullptr);
+        ListView_SetBkColor(hListView, dark ? RGB(37, 37, 38) : RGB(255, 255, 255));
+        ListView_SetTextBkColor(hListView, dark ? RGB(37, 37, 38) : RGB(255, 255, 255));
+        ListView_SetTextColor(hListView, dark ? RGB(212, 212, 212) : RGB(0, 0, 0));
+    }
+    if (g_pFlushMenuThemes) g_pFlushMenuThemes();
+    if (hListView) InvalidateRect(hListView, nullptr, TRUE);
+    if (hWnd) {
+        SetWindowPos(hWnd, nullptr, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
+                     SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        InvalidateRect(hWnd, nullptr, TRUE);
+    }
+}
+
+static bool handle_dark_lv_customdraw(int ctlId, LPARAM lParam,
+                                      LRESULT *outRes)
+{
+    NMHDR *nmh = (NMHDR *)lParam;
+    if ((int)nmh->idFrom != ctlId || nmh->code != NM_CUSTOMDRAW)
+        return false;
+    if (!db_get_setting_int("dark_mode", 0))
+        return false;
+
+    NMLVCUSTOMDRAW *lvcd = (NMLVCUSTOMDRAW *)lParam;
+    switch (lvcd->nmcd.dwDrawStage) {
+    case CDDS_PREPAINT:
+        *outRes = CDRF_NOTIFYITEMDRAW;
+        return true;
+    case CDDS_ITEMPREPAINT:
+        lvcd->clrText   = RGB(212, 212, 212);
+        lvcd->clrTextBk = RGB(37, 37, 38);
+        *outRes = CDRF_NEWFONT;
+        return true;
+    }
+    return false;
+}
 
 static HICON create_app_icon(void)
 {
@@ -87,11 +271,11 @@ void gui_init_dark_mode(void)
     HMODULE hUx = GetModuleHandle("uxtheme.dll");
     if (!hUx) return;
 
-    g_pSetPreferredAppMode = (fnSetPreferredAppMode)
+    g_pSetPreferredAppMode = (fnSetPreferredAppMode)(void *)
         GetProcAddress(hUx, MAKEINTRESOURCEA(135));
-    g_pAllowDarkModeForWindow = (fnAllowDarkModeForWindow)
+    g_pAllowDarkModeForWindow = (fnAllowDarkModeForWindow)(void *)
         GetProcAddress(hUx, MAKEINTRESOURCEA(133));
-    g_pFlushMenuThemes = (fnFlushMenuThemes)
+    g_pFlushMenuThemes = (fnFlushMenuThemes)(void *)
         GetProcAddress(hUx, MAKEINTRESOURCEA(136));
 
     if (g_pSetPreferredAppMode) {
@@ -106,6 +290,8 @@ static int is_mouse_vk(int vk)
            vk == VK_XBUTTON2;
 }
 
+static ListViewSortState g_mainSort = {1, false, false};
+
 static void refresh_list_view(void)
 {
     if (!g_hListView) return;
@@ -113,12 +299,20 @@ static void refresh_list_view(void)
     SendMessage(g_hListView, WM_SETREDRAW, FALSE, 0);
     ListView_DeleteAllItems(g_hListView);
 
+    int64_t todayTotal = db_get_today_count();
+    int wpm = 0, peakWpm = 0;
+    keyhook_get_wpm(&wpm, &peakWpm);
+
     KeyStat *stats = nullptr;
     int count = db_get_stats(&stats);
     if (!stats || count == 0) {
-        if (g_hTotalLabel)
-            SetWindowText(g_hTotalLabel,
-                "Total keypresses: 0 | Mouse clicks: 0");
+        if (g_hTotalLabel) {
+            char buf[192];
+            snprintf(buf, sizeof(buf),
+                "Total: 0 keys | 0 clicks  |  Today: %lld  |  Speed: %d WPM (Peak: %d)",
+                (long long)todayTotal, wpm, peakWpm);
+            SetWindowText(g_hTotalLabel, buf);
+        }
         SendMessage(g_hListView, WM_SETREDRAW, TRUE, 0);
         return;
     }
@@ -132,9 +326,11 @@ static void refresh_list_view(void)
     }
 
     if (g_hTotalLabel) {
-        char buf[128];
-        sprintf(buf, "Total keypresses: %lld | Mouse clicks: %lld",
-                (long long)kbTotal, (long long)mouseTotal);
+        char buf[192];
+        snprintf(buf, sizeof(buf),
+            "Total: %lld keys | %lld clicks  |  Today: %lld  |  Speed: %d WPM (Peak: %d)",
+            (long long)kbTotal, (long long)mouseTotal,
+            (long long)todayTotal, wpm, peakWpm);
         SetWindowText(g_hTotalLabel, buf);
     }
 
@@ -154,6 +350,7 @@ static void refresh_list_view(void)
     }
 
     db_free_stats(stats);
+    listview_apply_sort(g_hListView, &g_mainSort, g_mainSort.sortCol == 1);
     SendMessage(g_hListView, WM_SETREDRAW, TRUE, 0);
     InvalidateRect(g_hListView, nullptr, TRUE);
 }
@@ -287,6 +484,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg,
     case WM_CREATE: {
         CREATESTRUCT *cs = (CREATESTRUCT *)lParam;
         SetWindowLongPtr(hWnd, GWLP_USERDATA, (LONG_PTR)cs->lpCreateParams);
+        g_setCapturing = 0;
 
         int y = 20;
         CreateWindow("BUTTON", "Start with Windows",
@@ -481,27 +679,14 @@ static LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg,
     }
 
     case WM_CTLCOLORBTN:
-    case WM_CTLCOLORSTATIC: {
-        BOOL dark = db_get_setting_int("dark_mode", 0);
-        if (dark && g_hDarkBrush) {
-            HDC hdc = (HDC)wParam;
-            SetBkMode(hdc, TRANSPARENT);
-            SetTextColor(hdc, RGB(230, 230, 230));
-            return (LRESULT)g_hDarkBrush;
-        }
-        return DefWindowProc(hWnd, msg, wParam, lParam);
-    }
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX:
+        return handle_dark_ctlcolor(hWnd, msg, wParam, lParam);
 
-    case WM_ERASEBKGND: {
-        BOOL dark = db_get_setting_int("dark_mode", 0);
-        if (dark && g_hDarkBrush) {
-            RECT rc;
-            GetClientRect(hWnd, &rc);
-            FillRect((HDC)wParam, &rc, g_hDarkBrush);
-            return TRUE;
-        }
+    case WM_ERASEBKGND:
+        if (handle_dark_erasebkgnd(hWnd, (HDC)wParam)) return TRUE;
         return DefWindowProc(hWnd, msg, wParam, lParam);
-    }
 
     case WM_KEYDOWN:
     case WM_SYSKEYDOWN:
@@ -543,6 +728,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg,
             db_set_setting_int("keylogger_enabled", checked);
             keyhook_set_keylogger_enabled(checked);
             if (checked) keylog_open();
+            else { keylog_flush_events(); keylog_close(); }
             EnableWindow(GetDlgItem(hWnd, IDC_DELETE_KEYLOG_BTN),
                          checked ? FALSE : TRUE);
             return 0;
@@ -565,8 +751,12 @@ static LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg,
                 "Reset Statistics", MB_YESNO | MB_ICONWARNING);
             if (res == IDYES) {
                 db_reset_stats();
+                keyhook_reset_wpm();
                 HWND hMain = (HWND)GetWindowLongPtr(hWnd, GWLP_USERDATA);
-                if (hMain) PostMessage(hMain, WM_THEME_CHANGED, 0, 0);
+                if (hMain) {
+                    PostMessage(hMain, WM_THEME_CHANGED, 0, 0);
+                    PostMessage(hMain, WM_TIMER, ID_TIMER_REFRESH, 0);
+                }
             }
             return 0;
         }
@@ -631,16 +821,6 @@ static LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg,
             }
             MessageBox(hWnd, "Telegram credentials saved.",
                        "Telegram", MB_OK | MB_ICONINFORMATION);
-            {
-                char dbg[512], verify[256] = "";
-                extern void db_get_setting_str(const char *k,
-                    const char *d, char *o, int s);
-                db_get_setting_str("tg_chat_id", "", verify,
-                                    sizeof(verify));
-                sprintf(dbg, "Telegram credentials saved.\n"
-                    "Chat ID in DB: [%s]", verify);
-                MessageBox(hWnd, dbg, "Debug", MB_OK);
-            }
             return 0;
         }
         if (LOWORD(wParam) == IDOK) {
@@ -662,6 +842,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg,
             db_set_setting_int("keylogger_enabled", keylogger);
             keyhook_set_keylogger_enabled(keylogger);
             if (keylogger) keylog_open();
+            else { keylog_flush_events(); keylog_close(); }
 
             /* save Telegram settings */
             {
@@ -704,6 +885,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg,
 
 static void show_settings(HWND hParent)
 {
+    if (focus_existing_window("KSC_Settings")) return;
     static BOOL registered = FALSE;
 
     if (!registered) {
@@ -848,6 +1030,13 @@ static const HeatKey g_heatKeys[] = {
     {VK_RETURN,  975, 170, 35, 74, "Ent"},
     {VK_NUMPAD0, 850, 210, 75, 34, "0"},
     {VK_DECIMAL, 935, 210, 35, 34, "."},
+
+    /* Mouse buttons */
+    {VK_LBUTTON,  700, 256, 58, 32, "LMB"},
+    {VK_MBUTTON,  763, 256, 58, 32, "MMB"},
+    {VK_RBUTTON,  826, 256, 58, 32, "RMB"},
+    {VK_XBUTTON1, 889, 256, 58, 32, "M4"},
+    {VK_XBUTTON2, 952, 256, 58, 32, "M5"},
 };
 
 #define HEAT_KEY_COUNT (sizeof(g_heatKeys) / sizeof(g_heatKeys[0]))
@@ -893,12 +1082,79 @@ static COLORREF heat_color(int64_t count, int64_t max_count)
     return RGB(r, g, b);
 }
 
-static void draw_heatmap([[maybe_unused]] HWND hWnd, HDC hdc, RECT *rcClient,
-                         const char *appFilter)
+typedef struct {
+    int64_t counts[256];
+    int64_t maxCount;
+    int64_t totalCount;
+    int hoveredIdx;
+    BOOL trackingMouse;
+} HeatmapData;
+
+static void heatmap_load_counts(HWND hWnd, HeatmapData *hd)
+{
+    if (!hd) return;
+    memset(hd->counts, 0, sizeof(hd->counts));
+    hd->maxCount = 0;
+    hd->totalCount = 0;
+
+    char appFilter[256] = "";
+    HWND hAppCombo = GetDlgItem(hWnd, IDC_HEATMAP_APP_COMBO);
+    if (hAppCombo) {
+        int sel = (int)SendMessage(hAppCombo, CB_GETCURSEL, 0, 0);
+        if (sel > 0) {
+            SendMessage(hAppCombo, CB_GETLBTEXT, sel, (LPARAM)appFilter);
+        }
+    }
+
+    int period = 0;
+    HWND hPeriodCombo = GetDlgItem(hWnd, IDC_HEATMAP_PERIOD_COMBO);
+    if (hPeriodCombo) {
+        int p = (int)SendMessage(hPeriodCombo, CB_GETCURSEL, 0, 0);
+        if (p >= 0) period = p;
+    }
+
+    KeyStat *stats = nullptr;
+    int nStats = 0;
+    if (period == 0 && !appFilter[0]) {
+        nStats = db_get_stats(&stats);
+    } else {
+        SYSTEMTIME stNow, stFrom;
+        GetLocalTime(&stNow);
+        char to[16], from[16];
+        format_date_str(&stNow, to, sizeof(to));
+        if (period == 0) {
+            strcpy(from, "2000-01-01");
+        } else if (period == 1) {
+            strcpy(from, to);
+        } else {
+            int back = (period == 2) ? 6 : 29;
+            get_date_days_ago(back, &stFrom);
+            format_date_str(&stFrom, from, sizeof(from));
+        }
+        nStats = db_get_date_range_stats(from, to,
+            appFilter[0] ? appFilter : nullptr, 0, &stats);
+    }
+
+    if (stats && nStats > 0) {
+        for (int i = 0; i < nStats; i++) {
+            int vk = stats[i].key_code;
+            if (vk >= 0 && vk < 256) {
+                hd->counts[vk] += stats[i].count;
+                hd->totalCount += stats[i].count;
+                if (hd->counts[vk] > hd->maxCount)
+                    hd->maxCount = hd->counts[vk];
+            }
+        }
+        db_free_stats(stats);
+    }
+}
+
+static void draw_heatmap(HDC hdc, RECT *rcClient, const HeatmapData *hd)
 {
     BOOL dark = db_get_setting_int("dark_mode", 0);
     COLORREF bgColor = dark ? RGB(40, 40, 45) : RGB(245, 245, 248);
     COLORREF borderColor = dark ? RGB(60, 60, 65) : RGB(200, 200, 205);
+    COLORREF hoverBorder = dark ? RGB(255, 215, 100) : RGB(30, 100, 220);
     COLORREF textCold = dark ? RGB(220, 220, 230) : RGB(30, 30, 40);
     COLORREF textHot  = RGB(250, 250, 255);
 
@@ -906,45 +1162,7 @@ static void draw_heatmap([[maybe_unused]] HWND hWnd, HDC hdc, RECT *rcClient,
     FillRect(hdc, rcClient, hBg);
     DeleteObject(hBg);
 
-    int64_t counts[256] = {};
-    int64_t maxCount = 0;
-    if (appFilter && appFilter[0]) {
-        char today[16];
-        {
-            SYSTEMTIME st;
-            GetLocalTime(&st);
-            sprintf(today, "%04d-%02d-%02d",
-                    st.wYear, st.wMonth, st.wDay);
-        }
-        KeyStat *stats = nullptr;
-        int nStats = db_get_date_range_stats("2000-01-01", today,
-                                              appFilter, 0, &stats);
-        if (stats && nStats > 0) {
-            for (int i = 0; i < nStats; i++) {
-                if (stats[i].key_code >= 0 &&
-                    stats[i].key_code < 256) {
-                    counts[stats[i].key_code] = stats[i].count;
-                    if (stats[i].count > maxCount)
-                        maxCount = stats[i].count;
-                }
-            }
-            db_free_stats(stats);
-        }
-    } else {
-        KeyStat *stats = nullptr;
-        int nStats = db_get_stats(&stats);
-        if (stats && nStats > 0) {
-            for (int i = 0; i < nStats; i++) {
-                if (stats[i].key_code >= 0 &&
-                    stats[i].key_code < 256) {
-                    counts[stats[i].key_code] = stats[i].count;
-                    if (stats[i].count > maxCount)
-                        maxCount = stats[i].count;
-                }
-            }
-            db_free_stats(stats);
-        }
-    }
+    int64_t maxCount = hd ? hd->maxCount : 0;
 
     HFONT hFont = CreateFont(13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                               DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
@@ -954,20 +1172,21 @@ static void draw_heatmap([[maybe_unused]] HWND hWnd, HDC hdc, RECT *rcClient,
     SetBkMode(hdc, TRANSPARENT);
 
     HPEN hPen = CreatePen(PS_SOLID, 1, borderColor);
+    HPEN hHoverPen = CreatePen(PS_SOLID, 2, hoverBorder);
     HPEN hOldPen = SelectObject(hdc, hPen);
 
     for (int i = 0; i < (int)HEAT_KEY_COUNT; i++) {
         const HeatKey *hk = &g_heatKeys[i];
         int vk = hk->vk;
         if (vk < 0 || vk >= 256) continue;
-        int64_t cnt = counts[vk];
+        int64_t cnt = hd ? hd->counts[vk] : 0;
 
         COLORREF fill = heat_color(cnt, maxCount);
         HBRUSH hKeyBr = CreateSolidBrush(fill);
         SelectObject(hdc, hKeyBr);
+        SelectObject(hdc, (hd && hd->hoveredIdx == i) ? hHoverPen : hPen);
         Rectangle(hdc, hk->x, hk->y, hk->x + hk->w, hk->y + hk->h);
         DeleteObject(hKeyBr);
-        SelectObject(hdc, hPen);
 
         if (hk->label && hk->label[0]) {
             double t = (maxCount > 0) ? (double)cnt / (double)maxCount : 0.0;
@@ -976,11 +1195,6 @@ static void draw_heatmap([[maybe_unused]] HWND hWnd, HDC hdc, RECT *rcClient,
             DrawText(hdc, hk->label, -1, &lr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         }
     }
-
-    SelectObject(hdc, hOldPen);
-    DeleteObject(hPen);
-    SelectObject(hdc, hOldFont);
-    DeleteObject(hFont);
 
     int legendY = 300;
     COLORREF legendSteps[] = {
@@ -994,6 +1208,7 @@ static void draw_heatmap([[maybe_unused]] HWND hWnd, HDC hdc, RECT *rcClient,
     int segW = 55;
     int legendX = 15;
 
+    SelectObject(hdc, hPen);
     SetTextColor(hdc, dark ? RGB(200, 200, 210) : RGB(80, 80, 90));
     HFONT hSmFont = CreateFont(10, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
@@ -1021,31 +1236,64 @@ static void draw_heatmap([[maybe_unused]] HWND hWnd, HDC hdc, RECT *rcClient,
         DrawText(hdc, lbl, -1, &lr, DT_CENTER | DT_TOP | DT_SINGLELINE);
     }
 
+    /* Info bar on canvas (prevents edge clipping from child static) */
+    SelectObject(hdc, hFont);
+    char infoText[192];
+    if (hd && hd->hoveredIdx >= 0 && hd->hoveredIdx < (int)HEAT_KEY_COUNT) {
+        const HeatKey *hk = &g_heatKeys[hd->hoveredIdx];
+        const char *klabel = (hk->label && hk->label[0]) ? hk->label
+                           : (hk->vk == VK_SPACE ? "Space" : "?");
+        int64_t cnt = (hk->vk >= 0 && hk->vk < 256) ? hd->counts[hk->vk] : 0;
+        double pct = (hd->totalCount > 0)
+            ? (double)cnt / (double)hd->totalCount * 100.0 : 0.0;
+        snprintf(infoText, sizeof(infoText),
+                 "Selected: %s   |   Presses: %lld   |   Share: %.1f%%",
+                 klabel, (long long)cnt, pct);
+        SetTextColor(hdc, dark ? RGB(245, 220, 120) : RGB(20, 70, 160));
+    } else {
+        strcpy(infoText,
+               "Hover over any key or mouse button to inspect its count & share");
+        SetTextColor(hdc, dark ? RGB(170, 170, 185) : RGB(90, 90, 105));
+    }
+    RECT infoRect = {385, 302, 1010, 330};
+    HBRUSH hInfoBr = CreateSolidBrush(dark ? RGB(48, 48, 56) : RGB(236, 238, 244));
+    SelectObject(hdc, hInfoBr);
+    Rectangle(hdc, infoRect.left, infoRect.top, infoRect.right, infoRect.bottom);
+    DeleteObject(hInfoBr);
+    RECT infoTextRc = {infoRect.left + 10, infoRect.top, infoRect.right - 10, infoRect.bottom};
+    DrawText(hdc, infoText, -1, &infoTextRc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+    char totalBuf[96];
+    snprintf(totalBuf, sizeof(totalBuf), "Filtered Total: %lld presses",
+             (long long)(hd ? hd->totalCount : 0));
+    SetTextColor(hdc, dark ? RGB(200, 200, 210) : RGB(70, 70, 80));
+    RECT totRc = {385, 348, 1010, 372};
+    DrawText(hdc, totalBuf, -1, &totRc, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+
     SelectObject(hdc, hOldPen);
+    DeleteObject(hPen);
+    DeleteObject(hHoverPen);
     SelectObject(hdc, hOldFont);
+    DeleteObject(hFont);
     DeleteObject(hSmFont);
 }
+
 static LRESULT CALLBACK HeatmapWndProc(HWND hWnd, UINT msg,
                                         WPARAM wParam, LPARAM lParam)
 {
-    static HWND g_tipLabel = nullptr;
-    static int64_t g_counts[256];
-    static int64_t g_maxCnt;
-    static int64_t g_totalClicks;
-
     switch (msg) {
     case WM_CREATE: {
+        HeatmapData *hd = calloc(1, sizeof(HeatmapData));
+        if (hd) {
+            hd->hoveredIdx = -1;
+            SetWindowLongPtr(hWnd, GWLP_USERDATA, (LONG_PTR)hd);
+        }
         SetTimer(hWnd, ID_TIMER_REFRESH, 10000, nullptr);
-
-        g_tipLabel = CreateWindow(WC_STATIC, "",
-            WS_CHILD | SS_LEFT, 0, 0, 180, 20,
-            hWnd, nullptr, g_hInst, nullptr);
-        ShowWindow(g_tipLabel, SW_HIDE);
 
         HWND hCombo = CreateWindow(WC_COMBOBOX, "",
                         WS_CHILD | WS_VISIBLE |
                         CBS_DROPDOWNLIST | WS_VSCROLL,
-                        10, 345, 200, 200,
+                        10, 348, 200, 200,
                         hWnd, (HMENU)IDC_HEATMAP_APP_COMBO,
                         g_hInst, nullptr);
         SendMessage(hCombo, CB_ADDSTRING, 0,
@@ -1064,80 +1312,49 @@ static LRESULT CALLBACK HeatmapWndProc(HWND hWnd, UINT msg,
         }
         SendMessage(hCombo, CB_SETCURSEL, 0, 0);
 
-        BOOL dark = db_get_setting_int("dark_mode", 0);
-        if (dark) {
-            BOOL useDark = TRUE;
-            DwmSetWindowAttribute(hWnd, DWMWA_USE_IMMERSIVE_DARK_MODE,
-                                  &useDark, sizeof(useDark));
-            if (g_pAllowDarkModeForWindow)
-                g_pAllowDarkModeForWindow(hWnd, TRUE);
-            SetWindowPos(hWnd, nullptr, 0, 0, 0, 0,
-                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
-                         SWP_NOACTIVATE | SWP_FRAMECHANGED);
-        }
+        HWND hPeriod = CreateWindow(WC_COMBOBOX, "",
+                        WS_CHILD | WS_VISIBLE |
+                        CBS_DROPDOWNLIST | WS_VSCROLL,
+                        220, 348, 150, 200,
+                        hWnd, (HMENU)IDC_HEATMAP_PERIOD_COMBO,
+                        g_hInst, nullptr);
+        SendMessage(hPeriod, CB_ADDSTRING, 0, (LPARAM)"All Time");
+        SendMessage(hPeriod, CB_ADDSTRING, 0, (LPARAM)"Today");
+        SendMessage(hPeriod, CB_ADDSTRING, 0, (LPARAM)"Last 7 Days");
+        SendMessage(hPeriod, CB_ADDSTRING, 0, (LPARAM)"Last 30 Days");
+        SendMessage(hPeriod, CB_SETCURSEL, 0, 0);
+
+        heatmap_load_counts(hWnd, hd);
+        apply_listview_theme(hWnd, nullptr);
         return 0;
     }
     case WM_TIMER:
-        if (wParam == ID_TIMER_REFRESH) InvalidateRect(hWnd, nullptr, FALSE);
+        if (wParam == ID_TIMER_REFRESH) {
+            HeatmapData *hd = (HeatmapData *)GetWindowLongPtr(hWnd, GWLP_USERDATA);
+            heatmap_load_counts(hWnd, hd);
+            InvalidateRect(hWnd, nullptr, FALSE);
+        }
         return 0;
     case WM_ERASEBKGND:
         return TRUE;
     case WM_CTLCOLORBTN:
     case WM_CTLCOLORSTATIC:
-    case WM_CTLCOLORLISTBOX: {
-        BOOL dark = db_get_setting_int("dark_mode", 0);
-        if (dark && g_hDarkBrush) {
-            HDC hdc = (HDC)wParam;
-            SetBkMode(hdc, TRANSPARENT);
-            SetTextColor(hdc, RGB(230, 230, 230));
-            return (LRESULT)g_hDarkBrush;
-        }
-        return DefWindowProc(hWnd, msg, wParam, lParam);
-    }
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX:
+        return handle_dark_ctlcolor(hWnd, msg, wParam, lParam);
     case WM_PAINT: {
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hWnd, &ps);
         RECT rc;
         GetClientRect(hWnd, &rc);
 
+        HeatmapData *hd = (HeatmapData *)GetWindowLongPtr(hWnd, GWLP_USERDATA);
         /* double-buffer: draw to memory DC, then copy to screen */
         HDC memDC = CreateCompatibleDC(hdc);
         HBITMAP memBmp = CreateCompatibleBitmap(hdc, rc.right, rc.bottom);
         HBITMAP oldBmp = SelectObject(memDC, memBmp);
 
-        const char *appFilter = nullptr;
-        {
-            HWND hCombo = GetDlgItem(hWnd, IDC_HEATMAP_APP_COMBO);
-            int sel = (int)SendMessage(hCombo, CB_GETCURSEL, 0, 0);
-            if (sel > 0) {
-                static char buf[256];
-                buf[0] = '\0';
-                SendMessage(hCombo, CB_GETLBTEXT, sel, (LPARAM)buf);
-                if (buf[0]) appFilter = buf;
-            }
-        }
-        /* refresh cached counts */
-        memset(g_counts, 0, sizeof(g_counts));
-        g_maxCnt = 0;
-        g_totalClicks = 0;
-        {
-            KeyStat *stats = nullptr;
-            int ns = db_get_stats(&stats);
-            if (stats && ns > 0) {
-                for (int j = 0; j < ns; j++) {
-                    if (stats[j].key_code >= 0 &&
-                        stats[j].key_code < 256) {
-                        g_counts[stats[j].key_code] =
-                            stats[j].count;
-                        g_totalClicks += stats[j].count;
-                        if (stats[j].count > g_maxCnt)
-                            g_maxCnt = stats[j].count;
-                    }
-                }
-                db_free_stats(stats);
-            }
-        }
-        draw_heatmap(hWnd, memDC, &rc, appFilter);
+        draw_heatmap(memDC, &rc, hd);
 
         BitBlt(hdc, 0, 0, rc.right, rc.bottom, memDC, 0, 0, SRCCOPY);
         SelectObject(memDC, oldBmp);
@@ -1148,49 +1365,73 @@ static LRESULT CALLBACK HeatmapWndProc(HWND hWnd, UINT msg,
     }
 
     case WM_MOUSEMOVE: {
-        int mx = LOWORD(lParam), my = HIWORD(lParam);
+        HeatmapData *hd = (HeatmapData *)GetWindowLongPtr(hWnd, GWLP_USERDATA);
+        if (!hd) return 0;
+        if (!hd->trackingMouse) {
+            TRACKMOUSEEVENT tme = {sizeof(tme), TME_LEAVE, hWnd, 0};
+            TrackMouseEvent(&tme);
+            hd->trackingMouse = TRUE;
+        }
+        int mx = (short)LOWORD(lParam), my = (short)HIWORD(lParam);
+        int found = -1;
         for (int i = 0; i < (int)HEAT_KEY_COUNT; i++) {
             const HeatKey *hk = &g_heatKeys[i];
             if (mx >= hk->x && mx < hk->x + hk->w &&
                 my >= hk->y && my < hk->y + hk->h) {
-                char tip[128];
-                double pct = (g_totalClicks > 0) ?
-                    (double)g_counts[hk->vk] /
-                    (double)g_totalClicks * 100.0 : 0.0;
-                sprintf(tip, "%s: %lld (%.1f%%)",
-                    hk->label ? hk->label : "?",
-                    (long long)g_counts[hk->vk], pct);
-                SetWindowText(g_tipLabel, tip);
-                SetWindowPos(g_tipLabel, HWND_TOP,
-                    hk->x + hk->w + 5, hk->y, 180, 20,
-                    SWP_SHOWWINDOW | SWP_NOACTIVATE);
-                return 0;
+                found = i;
+                break;
             }
         }
-        ShowWindow(g_tipLabel, SW_HIDE);
+        if (found != hd->hoveredIdx) {
+            hd->hoveredIdx = found;
+            InvalidateRect(hWnd, nullptr, FALSE);
+        }
+        return 0;
+    }
+
+    case WM_MOUSELEAVE: {
+        HeatmapData *hd = (HeatmapData *)GetWindowLongPtr(hWnd, GWLP_USERDATA);
+        if (hd) {
+            hd->trackingMouse = FALSE;
+            if (hd->hoveredIdx != -1) {
+                hd->hoveredIdx = -1;
+                InvalidateRect(hWnd, nullptr, FALSE);
+            }
+        }
         return 0;
     }
 
     case WM_COMMAND:
         if (HIWORD(wParam) == CBN_SELCHANGE &&
-            LOWORD(wParam) == IDC_HEATMAP_APP_COMBO) {
-            InvalidateRect(hWnd, nullptr, TRUE);
+            (LOWORD(wParam) == IDC_HEATMAP_APP_COMBO ||
+             LOWORD(wParam) == IDC_HEATMAP_PERIOD_COMBO)) {
+            HeatmapData *hd = (HeatmapData *)GetWindowLongPtr(hWnd, GWLP_USERDATA);
+            heatmap_load_counts(hWnd, hd);
+            InvalidateRect(hWnd, nullptr, FALSE);
         }
         return 0;
     case WM_THEME_CHANGED:
-        handle_theme_changed(hWnd);
+        apply_listview_theme(hWnd, nullptr);
         return 0;
 
     case WM_CLOSE:
-        KillTimer(hWnd, ID_TIMER_REFRESH);
         DestroyWindow(hWnd);
         return 0;
+
+    case WM_DESTROY: {
+        KillTimer(hWnd, ID_TIMER_REFRESH);
+        HeatmapData *hd = (HeatmapData *)GetWindowLongPtr(hWnd, GWLP_USERDATA);
+        free(hd);
+        SetWindowLongPtr(hWnd, GWLP_USERDATA, 0);
+        return 0;
+    }
     }
     return DefWindowProc(hWnd, msg, wParam, lParam);
 }
 
 static void show_heatmap(HWND hParent)
 {
+    if (focus_existing_window("KSC_Heatmap")) return;
     static BOOL registered = FALSE;
     if (!registered) {
         WNDCLASS wc = {0};
@@ -1206,7 +1447,7 @@ static void show_heatmap(HWND hParent)
 
     HWND hDlg = CreateWindow("KSC_Heatmap", "KSC - Key Heatmap",
                  WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
-                 CW_USEDEFAULT, CW_USEDEFAULT, 1050, 400,
+                 CW_USEDEFAULT, CW_USEDEFAULT, 1050, 425,
                  hParent, nullptr, g_hInst, nullptr);
     ShowWindow(hDlg, SW_SHOW);
     UpdateWindow(hDlg);
@@ -1218,11 +1459,13 @@ typedef struct {
     HWND hDateTo;
     HWND hAppCombo;
     HWND hTotal;
+    ListViewSortState sort;
 } StatsWinData;
 
 static void stats_refresh_range(HWND hListView, HWND hTotal,
                                  SYSTEMTIME *stFrom, SYSTEMTIME *stTo,
-                                 const char *app)
+                                 const char *app,
+                                 const ListViewSortState *sortState)
 {
     if (!hListView || !stFrom || !stTo) return;
 
@@ -1230,10 +1473,8 @@ static void stats_refresh_range(HWND hListView, HWND hTotal,
     ListView_DeleteAllItems(hListView);
 
     char from[16], to[16];
-    sprintf(from, "%04d-%02d-%02d",
-            stFrom->wYear, stFrom->wMonth, stFrom->wDay);
-    sprintf(to, "%04d-%02d-%02d",
-            stTo->wYear, stTo->wMonth, stTo->wDay);
+    format_date_str(stFrom, from, sizeof(from));
+    format_date_str(stTo, to, sizeof(to));
 
     KeyStat *stats = nullptr;
     int count = db_get_date_range_stats(from, to, app, 0, &stats);
@@ -1256,6 +1497,7 @@ static void stats_refresh_range(HWND hListView, HWND hTotal,
 
     if (!stats || count == 0) {
         SendMessage(hListView, WM_SETREDRAW, TRUE, 0);
+        InvalidateRect(hListView, nullptr, TRUE);
         return;
     }
 
@@ -1275,6 +1517,8 @@ static void stats_refresh_range(HWND hListView, HWND hTotal,
     }
 
     db_free_stats(stats);
+    if (sortState)
+        listview_apply_sort(hListView, sortState, sortState->sortCol == 1);
     SendMessage(hListView, WM_SETREDRAW, TRUE, 0);
     InvalidateRect(hListView, nullptr, TRUE);
 }
@@ -1302,44 +1546,6 @@ static const char *get_selected_app(HWND hCombo)
     buf[0] = '\0';
     SendMessage(hCombo, CB_GETLBTEXT, sel, (LPARAM)buf);
     return buf[0] ? buf : nullptr;
-}
-
-static void stats_apply_theme(HWND hWnd, HWND hListView)
-{
-    BOOL dark = db_get_setting_int("dark_mode", 0);
-    if (dark) {
-        BOOL useDark = TRUE;
-        DwmSetWindowAttribute(hWnd, DWMWA_USE_IMMERSIVE_DARK_MODE,
-                              &useDark, sizeof(useDark));
-        if (g_pAllowDarkModeForWindow) {
-            g_pAllowDarkModeForWindow(hWnd, TRUE);
-            g_pAllowDarkModeForWindow(hListView, TRUE);
-        }
-        SetWindowTheme(hListView, L"DarkMode_Explorer", nullptr);
-        ListView_SetBkColor(hListView, RGB(37, 37, 38));
-        ListView_SetTextBkColor(hListView, RGB(37, 37, 38));
-        ListView_SetTextColor(hListView, RGB(212, 212, 212));
-    } else {
-        BOOL useDark = FALSE;
-        DwmSetWindowAttribute(hWnd, DWMWA_USE_IMMERSIVE_DARK_MODE,
-                              &useDark, sizeof(useDark));
-        if (g_pAllowDarkModeForWindow) {
-            g_pAllowDarkModeForWindow(hWnd, FALSE);
-            g_pAllowDarkModeForWindow(hListView, FALSE);
-        }
-        SetWindowTheme(hListView, L"Explorer", nullptr);
-        ListView_SetBkColor(hListView, RGB(255, 255, 255));
-        ListView_SetTextBkColor(hListView, RGB(255, 255, 255));
-        ListView_SetTextColor(hListView, RGB(0, 0, 0));
-    }
-    if (g_pFlushMenuThemes) g_pFlushMenuThemes();
-    if (hListView) InvalidateRect(hListView, nullptr, TRUE);
-    if (hWnd) {
-        SetWindowPos(hWnd, nullptr, 0, 0, 0, 0,
-                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
-                     SWP_NOACTIVATE | SWP_FRAMECHANGED);
-        InvalidateRect(hWnd, nullptr, TRUE);
-    }
 }
 
 static void export_csv_file(HWND hParent, KeyStat *stats, int count,
@@ -1403,29 +1609,9 @@ static LRESULT CALLBACK StatsWndProc(HWND hWnd, UINT msg,
                          10, 40, 400, 20,
                          hWnd, nullptr, g_hInst, nullptr);
 
-        SYSTEMTIME stEnd, stStart;
+        SYSTEMTIME stEnd, stMonthAgo;
         GetLocalTime(&stEnd);
-        stStart = stEnd;
-
-        if (stStart.wDay > 1) {
-            stStart.wDay--;
-        } else {
-            stStart.wMonth--;
-            if (stStart.wMonth == 0) {
-                stStart.wMonth = 12;
-                stStart.wYear--;
-            }
-            SYSTEMTIME stTmp = stStart;
-            stTmp.wDay = 28;
-            FILETIME ft;
-            SystemTimeToFileTime(&stTmp, &ft);
-            FileTimeToSystemTime(&ft, &stTmp);
-            stStart.wDay = stTmp.wDay;
-        }
-        SYSTEMTIME stMonthAgo = stEnd;
-        if (stMonthAgo.wMonth > 1)
-            stMonthAgo.wMonth--;
-        else { stMonthAgo.wMonth = 12; stMonthAgo.wYear--; }
+        get_date_days_ago(30, &stMonthAgo);
 
         SendMessage(hFrom, DTM_SETSYSTEMTIME, GDT_VALID,
                     (LPARAM)&stMonthAgo);
@@ -1460,8 +1646,9 @@ static LRESULT CALLBACK StatsWndProc(HWND hWnd, UINT msg,
         SetWindowPos(hLv, nullptr, 0, 62, rc.right, rc.bottom - 62,
                      SWP_NOZORDER);
 
-        stats_apply_theme(hWnd, hLv);
-        stats_refresh_range(hLv, data->hTotal, &stMonthAgo, &stEnd, nullptr);
+        apply_listview_theme(hWnd, hLv);
+        stats_refresh_range(hLv, data->hTotal, &stMonthAgo, &stEnd, nullptr,
+                            &data->sort);
         SetTimer(hWnd, ID_TIMER_REFRESH, 10000, nullptr);
         return 0;
     }
@@ -1478,59 +1665,29 @@ static LRESULT CALLBACK StatsWndProc(HWND hWnd, UINT msg,
         return 0;
     }
 
-    case WM_ERASEBKGND: {
-        BOOL dark = db_get_setting_int("dark_mode", 0);
-        if (dark && g_hDarkBrush) {
-            RECT rc;
-            GetClientRect(hWnd, &rc);
-            FillRect((HDC)wParam, &rc, g_hDarkBrush);
-            return TRUE;
-        }
+    case WM_ERASEBKGND:
+        if (handle_dark_erasebkgnd(hWnd, (HDC)wParam)) return TRUE;
         return DefWindowProc(hWnd, msg, wParam, lParam);
-    }
 
     case WM_CTLCOLORBTN:
-    case WM_CTLCOLORSTATIC: {
-        BOOL dark = db_get_setting_int("dark_mode", 0);
-        if (dark && g_hDarkBrush) {
-            HDC hdc = (HDC)wParam;
-            SetBkMode(hdc, TRANSPARENT);
-            SetTextColor(hdc, RGB(230, 230, 230));
-            return (LRESULT)g_hDarkBrush;
-        }
-        return DefWindowProc(hWnd, msg, wParam, lParam);
-    }
-
-    case WM_CTLCOLORLISTBOX: {
-        BOOL dark = db_get_setting_int("dark_mode", 0);
-        if (dark && g_hDarkBrush) {
-            HDC hdc = (HDC)wParam;
-            SetBkMode(hdc, TRANSPARENT);
-            SetBkColor(hdc, RGB(37, 37, 38));
-            SetTextColor(hdc, RGB(230, 230, 230));
-            return (LRESULT)g_hDarkBrush;
-        }
-        return DefWindowProc(hWnd, msg, wParam, lParam);
-    }
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX:
+        return handle_dark_ctlcolor(hWnd, msg, wParam, lParam);
 
     case WM_NOTIFY: {
+        LRESULT cdRes = 0;
+        if (handle_dark_lv_customdraw(IDC_LISTVIEW, lParam, &cdRes))
+            return cdRes;
         NMHDR *nmh = (NMHDR *)lParam;
-        if (nmh->idFrom == IDC_LISTVIEW && nmh->code == NM_CUSTOMDRAW) {
-            BOOL dark = db_get_setting_int("dark_mode", 0);
-            if (dark) {
-                NMLVCUSTOMDRAW *lvcd = (NMLVCUSTOMDRAW *)lParam;
-                switch (lvcd->nmcd.dwDrawStage) {
-                case CDDS_PREPAINT:
-                    SetWindowLongPtr(hWnd, DWLP_MSGRESULT,
-                                     CDRF_NOTIFYITEMDRAW);
-                    return TRUE;
-                case CDDS_ITEMPREPAINT:
-                    lvcd->clrText   = RGB(212, 212, 212);
-                    lvcd->clrTextBk = RGB(37, 37, 38);
-                    SetWindowLongPtr(hWnd, DWLP_MSGRESULT, CDRF_NEWFONT);
-                    return TRUE;
-                }
+        if (nmh->idFrom == IDC_LISTVIEW && nmh->code == LVN_COLUMNCLICK) {
+            NMLISTVIEW *pnm = (NMLISTVIEW *)lParam;
+            StatsWinData *d = (StatsWinData *)GetWindowLongPtr(hWnd, GWLP_USERDATA);
+            if (d) {
+                listview_toggle_sort(d->hListView, &d->sort, pnm->iSubItem,
+                                     pnm->iSubItem == 1);
             }
+            return 0;
         }
         break;
     }
@@ -1548,7 +1705,8 @@ static LRESULT CALLBACK StatsWndProc(HWND hWnd, UINT msg,
                     DTM_GETSYSTEMTIME, 0, (LPARAM)&stTo);
                 if (rFrom == GDT_VALID && rTo == GDT_VALID) {
                     const char *app = get_selected_app(d->hAppCombo);
-                    stats_refresh_range(d->hListView, d->hTotal, &stFrom, &stTo, app);
+                    stats_refresh_range(d->hListView, d->hTotal, &stFrom, &stTo,
+                                        app, &d->sort);
                 }
             }
         } else if (LOWORD(wParam) == IDC_APP_COMBO &&
@@ -1563,7 +1721,8 @@ static LRESULT CALLBACK StatsWndProc(HWND hWnd, UINT msg,
                     DTM_GETSYSTEMTIME, 0, (LPARAM)&stTo);
                 if (rFrom == GDT_VALID && rTo == GDT_VALID) {
                     const char *app = get_selected_app(d->hAppCombo);
-                    stats_refresh_range(d->hListView, d->hTotal, &stFrom, &stTo, app);
+                    stats_refresh_range(d->hListView, d->hTotal, &stFrom, &stTo,
+                                        app, &d->sort);
                 }
             }
         } else if (LOWORD(wParam) == IDC_EXPORT_BTN &&
@@ -1578,10 +1737,8 @@ static LRESULT CALLBACK StatsWndProc(HWND hWnd, UINT msg,
                     DTM_GETSYSTEMTIME, 0, (LPARAM)&stTo);
                 if (rFrom == GDT_VALID && rTo == GDT_VALID) {
                     char from[16], to[16];
-                    sprintf(from, "%04d-%02d-%02d",
-                            stFrom.wYear, stFrom.wMonth, stFrom.wDay);
-                    sprintf(to, "%04d-%02d-%02d",
-                            stTo.wYear, stTo.wMonth, stTo.wDay);
+                    format_date_str(&stFrom, from, sizeof(from));
+                    format_date_str(&stTo, to, sizeof(to));
                     const char *app = get_selected_app(d->hAppCombo);
                     KeyStat *stats = nullptr;
                     int cnt = db_get_date_range_stats(from, to, app, 1, &stats);
@@ -1611,22 +1768,24 @@ static LRESULT CALLBACK StatsWndProc(HWND hWnd, UINT msg,
                 if (rFrom == GDT_VALID && rTo == GDT_VALID) {
                     const char *app = get_selected_app(d->hAppCombo);
                     stats_refresh_range(d->hListView, d->hTotal,
-                                       &stFrom, &stTo, app);
+                                       &stFrom, &stTo, app, &d->sort);
                 }
             }
         }
         return 0;
 
-    case WM_THEME_CHANGED:
-        handle_theme_changed(hWnd);
+    case WM_THEME_CHANGED: {
+        StatsWinData *d = (StatsWinData *)GetWindowLongPtr(hWnd, GWLP_USERDATA);
+        apply_listview_theme(hWnd, d ? d->hListView : nullptr);
         return 0;
+    }
 
     case WM_CLOSE:
-        KillTimer(hWnd, ID_TIMER_REFRESH);
         DestroyWindow(hWnd);
         return 0;
 
     case WM_DESTROY: {
+        KillTimer(hWnd, ID_TIMER_REFRESH);
         StatsWinData *d = (StatsWinData *)GetWindowLongPtr(
             hWnd, GWLP_USERDATA);
         if (d) free(d);
@@ -1638,6 +1797,7 @@ static LRESULT CALLBACK StatsWndProc(HWND hWnd, UINT msg,
 
 static void show_stats_window(HWND hParent)
 {
+    if (focus_existing_window("KSC_Stats")) return;
     static BOOL registered = FALSE;
     if (!registered) {
         WNDCLASS wc = {0};
@@ -1687,10 +1847,11 @@ static void export_csv_file(HWND hParent, KeyStat *stats, int count,
 
     fprintf(f, "Key Code,Key Name,App,Count\n");
     for (int i = 0; i < count; i++) {
-        fprintf(f, "%d,\"%s\",\"%s\",%lld\n",
-                stats[i].key_code, stats[i].key_name,
-                stats[i].app,
-                (long long)stats[i].count);
+        fprintf(f, "%d,", stats[i].key_code);
+        write_csv_escaped(f, stats[i].key_name);
+        fputc(',', f);
+        write_csv_escaped(f, stats[i].app);
+        fprintf(f, ",%lld\n", (long long)stats[i].count);
     }
     fclose(f);
 
@@ -1728,6 +1889,9 @@ typedef struct {
     HWND hDateFrom;
     HWND hDateTo;
     HWND hAppCombo;
+    HWND hSearchEdit;
+    HWND hCountLbl;
+    ListViewSortState sort;
 } ViewLogsData;
 
 static void populate_logs_app_combo(HWND hCombo)
@@ -1744,6 +1908,37 @@ static void populate_logs_app_combo(HWND hCombo)
     SendMessage(hCombo, CB_SETCURSEL, 0, 0);
 }
 
+static bool logs_get_filter_params(const ViewLogsData *d,
+                                   char *from, size_t fsz,
+                                   char *to, size_t tsz,
+                                   char *appBuf, size_t asz,
+                                   char *searchBuf, size_t ssz)
+{
+    if (!d) return false;
+    SYSTEMTIME stFrom, stTo;
+    LRESULT rFrom = SendMessage(d->hDateFrom, DTM_GETSYSTEMTIME, 0, (LPARAM)&stFrom);
+    LRESULT rTo = SendMessage(d->hDateTo, DTM_GETSYSTEMTIME, 0, (LPARAM)&stTo);
+    if (rFrom != GDT_VALID || rTo != GDT_VALID) return false;
+
+    format_date_str(&stFrom, from, fsz);
+    format_date_str(&stTo, to, tsz);
+
+    appBuf[0] = '\0';
+    int sel = (int)SendMessage(d->hAppCombo, CB_GETCURSEL, 0, 0);
+    if (sel > 0) {
+        LRESULT len = SendMessage(d->hAppCombo, CB_GETLBTEXTLEN, sel, 0);
+        if (len >= 0 && (size_t)len < asz) {
+            SendMessage(d->hAppCombo, CB_GETLBTEXT, sel, (LPARAM)appBuf);
+        }
+    }
+
+    searchBuf[0] = '\0';
+    if (d->hSearchEdit) {
+        GetWindowText(d->hSearchEdit, searchBuf, (int)ssz);
+    }
+    return true;
+}
+
 static void refresh_logs_list(ViewLogsData *d)
 {
     if (!d || !d->hListView) return;
@@ -1751,35 +1946,27 @@ static void refresh_logs_list(ViewLogsData *d)
     SendMessage(d->hListView, WM_SETREDRAW, FALSE, 0);
     ListView_DeleteAllItems(d->hListView);
 
-    SYSTEMTIME stFrom, stTo;
-    LRESULT rFrom = SendMessage(d->hDateFrom,
-        DTM_GETSYSTEMTIME, 0, (LPARAM)&stFrom);
-    LRESULT rTo = SendMessage(d->hDateTo,
-        DTM_GETSYSTEMTIME, 0, (LPARAM)&stTo);
-    if (rFrom != GDT_VALID || rTo != GDT_VALID) {
+    char from[16], to[16], appBuf[256], searchBuf[128];
+    if (!logs_get_filter_params(d, from, sizeof(from), to, sizeof(to),
+                                appBuf, sizeof(appBuf),
+                                searchBuf, sizeof(searchBuf))) {
         SendMessage(d->hListView, WM_SETREDRAW, TRUE, 0);
         return;
     }
 
-    char from[16], to[16];
-    sprintf(from, "%04d-%02d-%02d",
-            stFrom.wYear, stFrom.wMonth, stFrom.wDay);
-    sprintf(to, "%04d-%02d-%02d",
-            stTo.wYear, stTo.wMonth, stTo.wDay);
-
-    const char *app = nullptr;
-    int sel = (int)SendMessage(d->hAppCombo, CB_GETCURSEL, 0, 0);
-    if (sel > 0) {
-        static char buf[256];
-        buf[0] = '\0';
-        SendMessage(d->hAppCombo, CB_GETLBTEXT, sel, (LPARAM)buf);
-        if (buf[0]) app = buf;
-    }
-
     KeylogEntry *entries = nullptr;
-    int count = keylog_query(from, to, app, &entries);
+    int count = keylog_query_filtered(from, to,
+                                      appBuf[0] ? appBuf : nullptr,
+                                      searchBuf[0] ? searchBuf : nullptr,
+                                      &entries);
+    if (d->hCountLbl) {
+        char lbl[64];
+        snprintf(lbl, sizeof(lbl), "Entries: %d", count);
+        SetWindowText(d->hCountLbl, lbl);
+    }
     if (!entries || count == 0) {
         SendMessage(d->hListView, WM_SETREDRAW, TRUE, 0);
+        InvalidateRect(d->hListView, nullptr, TRUE);
         return;
     }
 
@@ -1797,8 +1984,70 @@ static void refresh_logs_list(ViewLogsData *d)
     }
 
     keylog_free_entries(entries);
+    listview_apply_sort(d->hListView, &d->sort, false);
     SendMessage(d->hListView, WM_SETREDRAW, TRUE, 0);
     InvalidateRect(d->hListView, nullptr, TRUE);
+}
+
+static void export_logs_csv_file(HWND hWnd, const ViewLogsData *d)
+{
+    char from[16], to[16], appBuf[256], searchBuf[128];
+    if (!logs_get_filter_params(d, from, sizeof(from), to, sizeof(to),
+                                appBuf, sizeof(appBuf),
+                                searchBuf, sizeof(searchBuf))) {
+        return;
+    }
+
+    KeylogEntry *entries = nullptr;
+    int count = keylog_query_filtered(from, to,
+                                      appBuf[0] ? appBuf : nullptr,
+                                      searchBuf[0] ? searchBuf : nullptr,
+                                      &entries);
+    if (!entries || count == 0) {
+        if (entries) keylog_free_entries(entries);
+        MessageBox(hWnd, "No log entries match the current filters.",
+                   "Export Logs", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+
+    OPENFILENAME ofn;
+    char filePath[MAX_PATH] = "ksc_keylogs.csv";
+    ZeroMemory(&ofn, sizeof(ofn));
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = hWnd;
+    ofn.lpstrFilter = "CSV Files (*.csv)\0*.csv\0\0";
+    ofn.lpstrFile = filePath;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrDefExt = "csv";
+    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
+
+    if (!GetSaveFileName(&ofn)) {
+        keylog_free_entries(entries);
+        return;
+    }
+
+    FILE *f = fopen(filePath, "w");
+    if (!f) {
+        keylog_free_entries(entries);
+        MessageBox(hWnd, "Failed to create file.", "Export Error",
+                   MB_OK | MB_ICONERROR);
+        return;
+    }
+
+    fprintf(f, "Timestamp,Key,App\n");
+    for (int i = 0; i < count; i++) {
+        write_csv_escaped(f, entries[i].timestamp);
+        fputc(',', f);
+        write_csv_escaped(f, entries[i].key_name);
+        fputc(',', f);
+        write_csv_escaped(f, entries[i].app);
+        fputc('\n', f);
+    }
+    fclose(f);
+    keylog_free_entries(entries);
+
+    MessageBox(hWnd, "Exported successfully.", "Export Logs",
+               MB_OK | MB_ICONINFORMATION);
 }
 
 static LRESULT CALLBACK ViewLogsWndProc(HWND hWnd, UINT msg,
@@ -1809,7 +2058,7 @@ static LRESULT CALLBACK ViewLogsWndProc(HWND hWnd, UINT msg,
         ViewLogsData *d = calloc(1, sizeof(ViewLogsData));
         if (!d) return -1;
 
-        int yTop = 10, dph = 22;
+        int yTop = 8, dph = 22;
 
         CreateWindow(WC_STATIC, "From:",
                      WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
@@ -1817,39 +2066,52 @@ static LRESULT CALLBACK ViewLogsWndProc(HWND hWnd, UINT msg,
         d->hDateFrom = CreateWindow(DATETIMEPICK_CLASS, "",
                          WS_CHILD | WS_VISIBLE |
                          DTS_SHORTDATECENTURYFORMAT,
-                         50, yTop, 115, dph,
+                         50, yTop, 110, dph,
                          hWnd, (HMENU)IDC_DATE_FROM, g_hInst, nullptr);
 
         CreateWindow(WC_STATIC, "To:",
                      WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
-                     175, yTop, 22, dph, hWnd, nullptr, g_hInst, nullptr);
+                     168, yTop, 20, dph, hWnd, nullptr, g_hInst, nullptr);
         d->hDateTo = CreateWindow(DATETIMEPICK_CLASS, "",
                        WS_CHILD | WS_VISIBLE |
                        DTS_SHORTDATECENTURYFORMAT,
-                       200, yTop, 115, dph,
+                       192, yTop, 110, dph,
                        hWnd, (HMENU)IDC_DATE_TO, g_hInst, nullptr);
 
         CreateWindow(WC_STATIC, "App:",
                      WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
-                     325, yTop, 30, dph, hWnd, nullptr, g_hInst, nullptr);
+                     310, yTop, 28, dph, hWnd, nullptr, g_hInst, nullptr);
         d->hAppCombo = CreateWindow(WC_COMBOBOX, "",
                          WS_CHILD | WS_VISIBLE |
                          CBS_DROPDOWNLIST | WS_VSCROLL,
-                         358, yTop, 120, 200,
+                         342, yTop, 135, 200,
                          hWnd, (HMENU)IDC_APP_COMBO, g_hInst, nullptr);
         populate_logs_app_combo(d->hAppCombo);
 
         CreateWindow(WC_BUTTON, "Refresh",
                      WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                     490, yTop - 1, 65, dph + 2,
+                     485, yTop - 1, 65, dph + 2,
                      hWnd, (HMENU)IDC_STATS_REFRESH_BTN, g_hInst, nullptr);
+        CreateWindow(WC_BUTTON, "Export CSV",
+                     WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                     556, yTop - 1, 85, dph + 2,
+                     hWnd, (HMENU)IDC_LOGS_EXPORT_BTN, g_hInst, nullptr);
+
+        CreateWindow(WC_STATIC, "Search:",
+                     WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
+                     10, 36, 48, dph, hWnd, nullptr, g_hInst, nullptr);
+        d->hSearchEdit = CreateWindow(WC_EDIT, "",
+                         WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
+                         62, 36, 240, dph,
+                         hWnd, (HMENU)IDC_LOGS_SEARCH_EDIT, g_hInst, nullptr);
+        d->hCountLbl = CreateWindow(WC_STATIC, "Entries: 0",
+                         WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
+                         315, 36, 200, dph,
+                         hWnd, (HMENU)IDC_LOGS_COUNT_LBL, g_hInst, nullptr);
 
         SYSTEMTIME stEnd, stMonthAgo;
         GetLocalTime(&stEnd);
-        stMonthAgo = stEnd;
-        if (stMonthAgo.wMonth > 1)
-            stMonthAgo.wMonth--;
-        else { stMonthAgo.wMonth = 12; stMonthAgo.wYear--; }
+        get_date_days_ago(30, &stMonthAgo);
         SendMessage(d->hDateFrom, DTM_SETSYSTEMTIME, GDT_VALID,
                     (LPARAM)&stMonthAgo);
         SendMessage(d->hDateTo, DTM_SETSYSTEMTIME, GDT_VALID,
@@ -1857,7 +2119,7 @@ static LRESULT CALLBACK ViewLogsWndProc(HWND hWnd, UINT msg,
 
         HWND hLv = CreateWindow(WC_LISTVIEW, "",
                     WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL,
-                    0, 42, 10, 10,
+                    0, 66, 10, 10,
                     hWnd, (HMENU)IDC_LISTVIEW, g_hInst, nullptr);
         ListView_SetExtendedListViewStyle(hLv,
             LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES |
@@ -1866,14 +2128,17 @@ static LRESULT CALLBACK ViewLogsWndProc(HWND hWnd, UINT msg,
         LVCOLUMN lvc;
         memset(&lvc, 0, sizeof(lvc));
         lvc.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
-        lvc.cx = 140;
+        lvc.cx = 155;
         lvc.pszText = "Timestamp";
+        lvc.iSubItem = 0;
         ListView_InsertColumn(hLv, 0, &lvc);
-        lvc.cx = 100;
+        lvc.cx = 110;
         lvc.pszText = "Key";
+        lvc.iSubItem = 1;
         ListView_InsertColumn(hLv, 1, &lvc);
-        lvc.cx = 320;
+        lvc.cx = 440;
         lvc.pszText = "App";
+        lvc.iSubItem = 2;
         ListView_InsertColumn(hLv, 2, &lvc);
 
         d->hListView = hLv;
@@ -1882,30 +2147,11 @@ static LRESULT CALLBACK ViewLogsWndProc(HWND hWnd, UINT msg,
         {
             RECT rc;
             GetClientRect(hWnd, &rc);
-            SetWindowPos(hLv, nullptr, 0, 42, rc.right, rc.bottom - 42,
+            SetWindowPos(hLv, nullptr, 0, 66, rc.right, rc.bottom - 66,
                          SWP_NOZORDER);
         }
 
-        /* apply dark mode */
-        {
-            BOOL dark = db_get_setting_int("dark_mode", 0);
-            if (dark) {
-                BOOL useDark = TRUE;
-                DwmSetWindowAttribute(hWnd,
-                    DWMWA_USE_IMMERSIVE_DARK_MODE,
-                    &useDark, sizeof(useDark));
-                if (g_pAllowDarkModeForWindow)
-                    g_pAllowDarkModeForWindow(hWnd, TRUE);
-                SetWindowPos(hWnd, nullptr, 0, 0, 0, 0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
-                    SWP_NOACTIVATE | SWP_FRAMECHANGED);
-                SetWindowTheme(hLv, L"DarkMode_Explorer", nullptr);
-                ListView_SetBkColor(hLv, RGB(37, 37, 38));
-                ListView_SetTextBkColor(hLv, RGB(37, 37, 38));
-                ListView_SetTextColor(hLv, RGB(212, 212, 212));
-            }
-        }
-
+        apply_listview_theme(hWnd, hLv);
         refresh_logs_list(d);
         return 0;
     }
@@ -1916,58 +2162,45 @@ static LRESULT CALLBACK ViewLogsWndProc(HWND hWnd, UINT msg,
         if (d && d->hListView) {
             RECT rc;
             GetClientRect(hWnd, &rc);
-            SetWindowPos(d->hListView, nullptr, 0, 42,
-                         rc.right, rc.bottom - 42, SWP_NOZORDER);
+            SetWindowPos(d->hListView, nullptr, 0, 66,
+                         rc.right, rc.bottom - 66, SWP_NOZORDER);
         }
         return 0;
     }
 
-    case WM_ERASEBKGND: {
-        BOOL dark = db_get_setting_int("dark_mode", 0);
-        if (dark && g_hDarkBrush) {
-            RECT rc;
-            GetClientRect(hWnd, &rc);
-            FillRect((HDC)wParam, &rc, g_hDarkBrush);
-            return TRUE;
-        }
+    case WM_ERASEBKGND:
+        if (handle_dark_erasebkgnd(hWnd, (HDC)wParam)) return TRUE;
         return DefWindowProc(hWnd, msg, wParam, lParam);
-    }
 
     case WM_CTLCOLORBTN:
-    case WM_CTLCOLORSTATIC: {
-        BOOL dark = db_get_setting_int("dark_mode", 0);
-        if (dark && g_hDarkBrush) {
-            HDC hdc = (HDC)wParam;
-            SetBkMode(hdc, TRANSPARENT);
-            SetTextColor(hdc, RGB(230, 230, 230));
-            return (LRESULT)g_hDarkBrush;
-        }
-        return DefWindowProc(hWnd, msg, wParam, lParam);
-    }
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX:
+        return handle_dark_ctlcolor(hWnd, msg, wParam, lParam);
 
     case WM_NOTIFY: {
+        LRESULT cdRes = 0;
+        if (handle_dark_lv_customdraw(IDC_LISTVIEW, lParam, &cdRes))
+            return cdRes;
         NMHDR *nmh = (NMHDR *)lParam;
-        if (nmh->idFrom == IDC_LISTVIEW &&
-            nmh->code == NM_CUSTOMDRAW) {
-            BOOL dark = db_get_setting_int("dark_mode", 0);
-            if (dark) {
-                NMLVCUSTOMDRAW *lvcd = (NMLVCUSTOMDRAW *)lParam;
-                switch (lvcd->nmcd.dwDrawStage) {
-                case CDDS_PREPAINT:
-                    SetWindowLongPtr(hWnd, DWLP_MSGRESULT,
-                                     CDRF_NOTIFYITEMDRAW);
-                    return TRUE;
-                case CDDS_ITEMPREPAINT:
-                    lvcd->clrText   = RGB(212, 212, 212);
-                    lvcd->clrTextBk = RGB(37, 37, 38);
-                    SetWindowLongPtr(hWnd, DWLP_MSGRESULT,
-                                     CDRF_NEWFONT);
-                    return TRUE;
-                }
+        if (nmh->idFrom == IDC_LISTVIEW && nmh->code == LVN_COLUMNCLICK) {
+            NMLISTVIEW *pnm = (NMLISTVIEW *)lParam;
+            ViewLogsData *d = (ViewLogsData *)GetWindowLongPtr(hWnd, GWLP_USERDATA);
+            if (d) {
+                listview_toggle_sort(d->hListView, &d->sort, pnm->iSubItem, false);
             }
+            return 0;
         }
         break;
     }
+
+    case WM_TIMER:
+        if (wParam == ID_TIMER_REFRESH) {
+            KillTimer(hWnd, ID_TIMER_REFRESH);
+            ViewLogsData *d = (ViewLogsData *)GetWindowLongPtr(hWnd, GWLP_USERDATA);
+            refresh_logs_list(d);
+        }
+        return 0;
 
     case WM_COMMAND:
         if (LOWORD(wParam) == IDC_STATS_REFRESH_BTN &&
@@ -1980,18 +2213,29 @@ static LRESULT CALLBACK ViewLogsWndProc(HWND hWnd, UINT msg,
             ViewLogsData *d = (ViewLogsData *)GetWindowLongPtr(
                 hWnd, GWLP_USERDATA);
             refresh_logs_list(d);
+        } else if (LOWORD(wParam) == IDC_LOGS_SEARCH_EDIT &&
+                   HIWORD(wParam) == EN_CHANGE) {
+            SetTimer(hWnd, ID_TIMER_REFRESH, 180, nullptr);
+        } else if (LOWORD(wParam) == IDC_LOGS_EXPORT_BTN &&
+                   HIWORD(wParam) == BN_CLICKED) {
+            ViewLogsData *d = (ViewLogsData *)GetWindowLongPtr(
+                hWnd, GWLP_USERDATA);
+            export_logs_csv_file(hWnd, d);
         }
         return 0;
 
-    case WM_THEME_CHANGED:
-        handle_theme_changed(hWnd);
+    case WM_THEME_CHANGED: {
+        ViewLogsData *d = (ViewLogsData *)GetWindowLongPtr(hWnd, GWLP_USERDATA);
+        apply_listview_theme(hWnd, d ? d->hListView : nullptr);
         return 0;
+    }
 
     case WM_CLOSE:
         DestroyWindow(hWnd);
         return 0;
 
     case WM_DESTROY: {
+        KillTimer(hWnd, ID_TIMER_REFRESH);
         ViewLogsData *d = (ViewLogsData *)GetWindowLongPtr(
             hWnd, GWLP_USERDATA);
         if (d) free(d);
@@ -2003,6 +2247,7 @@ static LRESULT CALLBACK ViewLogsWndProc(HWND hWnd, UINT msg,
 
 static void show_view_logs(HWND hParent)
 {
+    if (focus_existing_window("KSC_ViewLogs")) return;
     static BOOL registered = FALSE;
     if (!registered) {
         WNDCLASS wc = {0};
@@ -2017,7 +2262,7 @@ static void show_view_logs(HWND hParent)
     }
     HWND hDlg = CreateWindow("KSC_ViewLogs", "ksc - Keylogger Logs",
                  WS_OVERLAPPEDWINDOW,
-                 CW_USEDEFAULT, CW_USEDEFAULT, 680, 440,
+                 CW_USEDEFAULT, CW_USEDEFAULT, 800, 460,
                  hParent, nullptr, g_hInst, nullptr);
     ShowWindow(hDlg, SW_SHOW);
     UpdateWindow(hDlg);
@@ -2043,6 +2288,7 @@ static void format_shortcut(int packed, char *buf, [[maybe_unused]] int bufsize)
 }
 
 typedef struct {
+    HWND hDlg;
     HWND hMinEdit, hSecEdit, hMsEdit;
     HWND hOffsetEdit;
     HWND hBtnLeft, hBtnRight;
@@ -2059,6 +2305,11 @@ typedef struct {
     int capturing;
     int hotkeyStartId;
     int hotkeyStopId;
+    int intervalMs;
+    int offsetMs;
+    BOOL isLeft;
+    BOOL continuous;
+    int limit;
 } ClickerData;
 
 static int register_clicker_hotkey(HWND hMain, int id, int shortcut)
@@ -2080,29 +2331,21 @@ static DWORD WINAPI ClickerThreadProc(LPVOID param)
     srand(GetTickCount());
     d->clickedSoFar = 0;
 
-    HWND hDlg = GetParent(d->hBtnStart);
-    int intervalMs = GetDlgItemInt(hDlg, IDC_CLICK_INTERVAL_MIN,
-                                    nullptr, FALSE) * 60000
-                   + GetDlgItemInt(hDlg, IDC_CLICK_INTERVAL_SEC,
-                                    nullptr, FALSE) * 1000
-                   + GetDlgItemInt(hDlg, IDC_CLICK_INTERVAL_MS,
-                                    nullptr, FALSE);
-    int offsetMs = GetDlgItemInt(hDlg, IDC_CLICK_RANDOM_OFFSET,
-                                  nullptr, FALSE);
-    BOOL isLeft = (SendMessage(d->hBtnLeft, BM_GETCHECK, 0, 0)
-                   == BST_CHECKED);
-    BOOL continuous = (SendMessage(d->hContinuous,
-                        BM_GETCHECK, 0, 0) == BST_CHECKED);
-    int limit = GetDlgItemInt(hDlg, IDC_CLICK_LIMITED_COUNT,
-                               nullptr, FALSE);
-
+    int intervalMs = d->intervalMs;
+    int offsetMs = d->offsetMs;
+    BOOL isLeft = d->isLeft;
+    BOOL continuous = d->continuous;
+    int limit = d->limit;
     if (intervalMs < 10) intervalMs = 10;
 
+    BOOL finishedLimit = FALSE;
     while (d->running) {
         INPUT inp[2];
         memset(inp, 0, sizeof(inp));
         inp[0].type = INPUT_MOUSE;
         inp[1].type = INPUT_MOUSE;
+        inp[0].mi.dwExtraInfo = KSC_INJECTED_MAGIC;
+        inp[1].mi.dwExtraInfo = KSC_INJECTED_MAGIC;
         if (isLeft) {
             inp[0].mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
             inp[1].mi.dwFlags = MOUSEEVENTF_LEFTUP;
@@ -2115,6 +2358,7 @@ static DWORD WINAPI ClickerThreadProc(LPVOID param)
         d->clickedSoFar++;
         if (!continuous && d->clickedSoFar >= limit) {
             d->running = FALSE;
+            finishedLimit = TRUE;
             break;
         }
 
@@ -2131,6 +2375,9 @@ static DWORD WINAPI ClickerThreadProc(LPVOID param)
             delay -= chunk;
         }
     }
+
+    if (finishedLimit && d->hDlg && IsWindow(d->hDlg))
+        PostMessage(d->hDlg, WM_CLICKER_CMD, 2, 0);
 
     return 0;
 }
@@ -2157,6 +2404,7 @@ static LRESULT CALLBACK MouseClickerWndProc(HWND hWnd, UINT msg,
     case WM_CREATE: {
         ClickerData *d = calloc(1, sizeof(ClickerData));
         if (!d) return -1;
+        d->hDlg = hWnd;
         d->hotkeyStartId = HOTKEY_ID_START_CLICK;
         d->hotkeyStopId  = HOTKEY_ID_STOP_CLICK;
         {
@@ -2315,9 +2563,10 @@ static LRESULT CALLBACK MouseClickerWndProc(HWND hWnd, UINT msg,
             SendMessage(d->hBtnLeft, BM_SETCHECK, BST_CHECKED, 0);
         else
             SendMessage(d->hBtnRight, BM_SETCHECK, BST_CHECKED, 0);
-        if (db_get_setting_int("clicker_continuous", 1))
+        if (db_get_setting_int("clicker_continuous", 1)) {
             SendMessage(d->hContinuous, BM_SETCHECK, BST_CHECKED, 0);
-        else {
+            EnableWindow(d->hLimitedCount, FALSE);
+        } else {
             SendMessage(d->hLimited, BM_SETCHECK, BST_CHECKED, 0);
             EnableWindow(d->hLimitedCount, TRUE);
         }
@@ -2340,28 +2589,15 @@ static LRESULT CALLBACK MouseClickerWndProc(HWND hWnd, UINT msg,
         return 0;
     }
 
-    case WM_ERASEBKGND: {
-        BOOL dark = db_get_setting_int("dark_mode", 0);
-        if (dark && g_hDarkBrush) {
-            RECT rc;
-            GetClientRect(hWnd, &rc);
-            FillRect((HDC)wParam, &rc, g_hDarkBrush);
-            return TRUE;
-        }
+    case WM_ERASEBKGND:
+        if (handle_dark_erasebkgnd(hWnd, (HDC)wParam)) return TRUE;
         return DefWindowProc(hWnd, msg, wParam, lParam);
-    }
 
     case WM_CTLCOLORBTN:
-    case WM_CTLCOLORSTATIC: {
-        BOOL dark = db_get_setting_int("dark_mode", 0);
-        if (dark && g_hDarkBrush) {
-            HDC hdc = (HDC)wParam;
-            SetBkMode(hdc, TRANSPARENT);
-            SetTextColor(hdc, RGB(230, 230, 230));
-            return (LRESULT)g_hDarkBrush;
-        }
-        return DefWindowProc(hWnd, msg, wParam, lParam);
-    }
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX:
+        return handle_dark_ctlcolor(hWnd, msg, wParam, lParam);
 
     case WM_KEYDOWN:
     case WM_SYSKEYDOWN: {
@@ -2414,6 +2650,27 @@ static LRESULT CALLBACK MouseClickerWndProc(HWND hWnd, UINT msg,
         int cmd = (int)wParam;
         if (cmd == 0 && !d->running) {
             /* Start */
+            if (d->hThread) {
+                WaitForSingleObject(d->hThread, 1000);
+                CloseHandle(d->hThread);
+                d->hThread = nullptr;
+            }
+            int intervalMs = GetDlgItemInt(hWnd, IDC_CLICK_INTERVAL_MIN,
+                                           nullptr, FALSE) * 60000
+                           + GetDlgItemInt(hWnd, IDC_CLICK_INTERVAL_SEC,
+                                           nullptr, FALSE) * 1000
+                           + GetDlgItemInt(hWnd, IDC_CLICK_INTERVAL_MS,
+                                           nullptr, FALSE);
+            if (intervalMs < 10) intervalMs = 10;
+            d->intervalMs = intervalMs;
+            d->offsetMs = GetDlgItemInt(hWnd, IDC_CLICK_RANDOM_OFFSET,
+                                        nullptr, FALSE);
+            d->isLeft = (SendMessage(d->hBtnLeft, BM_GETCHECK, 0, 0)
+                         == BST_CHECKED);
+            d->continuous = (SendMessage(d->hContinuous, BM_GETCHECK, 0, 0)
+                             == BST_CHECKED);
+            d->limit = GetDlgItemInt(hWnd, IDC_CLICK_LIMITED_COUNT,
+                                     nullptr, FALSE);
             d->running = TRUE;
             d->hThread = CreateThread(nullptr, 0, ClickerThreadProc,
                                        d, 0, nullptr);
@@ -2553,18 +2810,26 @@ static LRESULT CALLBACK MouseClickerWndProc(HWND hWnd, UINT msg,
 typedef struct {
     HWND hStatus;
     HWND hLoginBtn;
+    HWND hCompressChk;
     HWND hListView;
     int  loggedIn;
+    ListViewSortState sort;
 } CloudBakData;
 
-static void refresh_cloud_history(HWND hListView)
+static void refresh_cloud_history(HWND hListView,
+                                  const ListViewSortState *sortState)
 {
     if (!hListView) return;
+    SendMessage(hListView, WM_SETREDRAW, FALSE, 0);
     ListView_DeleteAllItems(hListView);
 
     CloudSyncEntry *entries = nullptr;
     int count = 0;
-    if (!cloudsync_load_history(&entries, &count)) return;
+    if (!cloudsync_load_history(&entries, &count)) {
+        SendMessage(hListView, WM_SETREDRAW, TRUE, 0);
+        InvalidateRect(hListView, nullptr, TRUE);
+        return;
+    }
 
     LVITEM lvi;
     memset(&lvi, 0, sizeof(lvi));
@@ -2583,26 +2848,10 @@ static void refresh_cloud_history(HWND hListView)
     }
 
     cloudsync_free_history(entries);
-}
-
-static void cloud_apply_dark(HWND hWnd, HWND hLv)
-{
-    BOOL dark = db_get_setting_int("dark_mode", 0);
-    if (dark) {
-        BOOL useDark = TRUE;
-        DwmSetWindowAttribute(hWnd, DWMWA_USE_IMMERSIVE_DARK_MODE,
-                              &useDark, sizeof(useDark));
-        if (g_pAllowDarkModeForWindow) g_pAllowDarkModeForWindow(hWnd, TRUE);
-        SetWindowPos(hWnd, nullptr, 0, 0, 0, 0,
-                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
-                     SWP_NOACTIVATE | SWP_FRAMECHANGED);
-        if (hLv) {
-            SetWindowTheme(hLv, L"DarkMode_Explorer", nullptr);
-            ListView_SetBkColor(hLv, RGB(37, 37, 38));
-            ListView_SetTextBkColor(hLv, RGB(37, 37, 38));
-            ListView_SetTextColor(hLv, RGB(212, 212, 212));
-        }
-    }
+    if (sortState)
+        listview_apply_sort(hListView, sortState, sortState->sortCol == 2);
+    SendMessage(hListView, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(hListView, nullptr, TRUE);
 }
 
 static LRESULT CALLBACK CloudBackupWndProc(HWND hWnd, UINT msg,
@@ -2697,6 +2946,13 @@ static LRESULT CALLBACK CloudBackupWndProc(HWND hWnd, UINT msg,
                      WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                      10, y, 100, 26, hWnd,
                      (HMENU)IDC_CLOUD_BACKUP_NOW, g_hInst, nullptr);
+        d->hCompressChk = CreateWindow("BUTTON",
+                     "Compress backups (.zip) before uploading",
+                     WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                     125, y + 2, 290, 22, hWnd,
+                     (HMENU)IDC_CLOUD_COMPRESS_CHK, g_hInst, nullptr);
+        if (cloudsync_get_compress())
+            SendMessage(d->hCompressChk, BM_SETCHECK, BST_CHECKED, 0);
 
         y += 36;
         CreateWindow(WC_STATIC, "\x1a\x1a\x1a SSH Target \x1a\x1a\x1a",
@@ -2783,8 +3039,8 @@ static LRESULT CALLBACK CloudBackupWndProc(HWND hWnd, UINT msg,
                          rc.bottom - y, SWP_NOZORDER);
         }
 
-        cloud_apply_dark(hWnd, hLv);
-        refresh_cloud_history(hLv);
+        apply_listview_theme(hWnd, hLv);
+        refresh_cloud_history(hLv, &d->sort);
         return 0;
     }
 
@@ -2801,48 +3057,30 @@ static LRESULT CALLBACK CloudBackupWndProc(HWND hWnd, UINT msg,
         return 0;
     }
 
-    case WM_ERASEBKGND: {
-        BOOL dark = db_get_setting_int("dark_mode", 0);
-        if (dark && g_hDarkBrush) {
-            RECT rc;
-            GetClientRect(hWnd, &rc);
-            FillRect((HDC)wParam, &rc, g_hDarkBrush);
-            return TRUE;
-        }
+    case WM_ERASEBKGND:
+        if (handle_dark_erasebkgnd(hWnd, (HDC)wParam)) return TRUE;
         return DefWindowProc(hWnd, msg, wParam, lParam);
-    }
 
     case WM_CTLCOLORBTN:
-    case WM_CTLCOLORSTATIC: {
-        BOOL dark = db_get_setting_int("dark_mode", 0);
-        if (dark && g_hDarkBrush) {
-            HDC hdc = (HDC)wParam;
-            SetBkMode(hdc, TRANSPARENT);
-            SetTextColor(hdc, RGB(230, 230, 230));
-            return (LRESULT)g_hDarkBrush;
-        }
-        return DefWindowProc(hWnd, msg, wParam, lParam);
-    }
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX:
+        return handle_dark_ctlcolor(hWnd, msg, wParam, lParam);
 
     case WM_NOTIFY: {
+        LRESULT cdRes = 0;
+        if (handle_dark_lv_customdraw(IDC_CLOUD_LISTVIEW, lParam, &cdRes))
+            return cdRes;
         NMHDR *nmh = (NMHDR *)lParam;
-        if (nmh->idFrom == IDC_CLOUD_LISTVIEW &&
-            nmh->code == NM_CUSTOMDRAW) {
-            BOOL dark = db_get_setting_int("dark_mode", 0);
-            if (dark) {
-                NMLVCUSTOMDRAW *lvcd = (NMLVCUSTOMDRAW *)lParam;
-                switch (lvcd->nmcd.dwDrawStage) {
-                case CDDS_PREPAINT:
-                    SetWindowLongPtr(hWnd, DWLP_MSGRESULT,
-                                     CDRF_NOTIFYITEMDRAW);
-                    return TRUE;
-                case CDDS_ITEMPREPAINT:
-                    lvcd->clrText   = RGB(212, 212, 212);
-                    lvcd->clrTextBk = RGB(37, 37, 38);
-                    SetWindowLongPtr(hWnd, DWLP_MSGRESULT, CDRF_NEWFONT);
-                    return TRUE;
-                }
+        if (nmh->idFrom == IDC_CLOUD_LISTVIEW && nmh->code == LVN_COLUMNCLICK) {
+            NMLISTVIEW *pnm = (NMLISTVIEW *)lParam;
+            CloudBakData *d = (CloudBakData *)GetWindowLongPtr(
+                hWnd, GWLP_USERDATA);
+            if (d) {
+                listview_toggle_sort(d->hListView, &d->sort, pnm->iSubItem,
+                                     pnm->iSubItem == 2);
             }
+            return 0;
         }
         break;
     }
@@ -2866,6 +3104,7 @@ static LRESULT CALLBACK CloudBackupWndProc(HWND hWnd, UINT msg,
                     "Status: Opening browser...");
                 ShowWindow(hWnd, SW_MINIMIZE);
                 cloudsync_login(hWnd);
+                if (!IsWindow(hWnd)) return 0;
                 ShowWindow(hWnd, SW_RESTORE);
                 d->loggedIn = cloudsync_is_logged_in();
                 char buf[256];
@@ -2876,6 +3115,14 @@ static LRESULT CALLBACK CloudBackupWndProc(HWND hWnd, UINT msg,
                 SetWindowText(d->hLoginBtn,
                     d->loggedIn ? "Logout" : "Login");
             }
+            return 0;
+        }
+
+        if (id == IDC_CLOUD_COMPRESS_CHK &&
+            HIWORD(wParam) == BN_CLICKED) {
+            int chk = (SendMessage(d->hCompressChk, BM_GETCHECK, 0, 0)
+                       == BST_CHECKED) ? 1 : 0;
+            cloudsync_set_compress(chk);
             return 0;
         }
 
@@ -2944,10 +3191,13 @@ static LRESULT CALLBACK CloudBackupWndProc(HWND hWnd, UINT msg,
             if (wParam >= 100) {
                 char buf[256];
                 cloudsync_get_email(buf, sizeof(buf));
+                const char *suffix = "sync complete";
+                if (lParam < 0) suffix = "nothing to back up";
+                else if (lParam == 0) suffix = "sync failed";
                 char label[320];
-                sprintf(label, "Status: %s (sync complete)", buf);
+                sprintf(label, "Status: %s (%s)", buf, suffix);
                 SetWindowText(d->hStatus, label);
-                refresh_cloud_history(d->hListView);
+                refresh_cloud_history(d->hListView, &d->sort);
             } else {
                 char buf[320];
                 sprintf(buf,
@@ -2959,9 +3209,11 @@ static LRESULT CALLBACK CloudBackupWndProc(HWND hWnd, UINT msg,
         return 0;
     }
 
-    case WM_THEME_CHANGED:
-        handle_theme_changed(hWnd);
+    case WM_THEME_CHANGED: {
+        CloudBakData *d = (CloudBakData *)GetWindowLongPtr(hWnd, GWLP_USERDATA);
+        apply_listview_theme(hWnd, d ? d->hListView : nullptr);
         return 0;
+    }
 
     case WM_CLOSE:
         DestroyWindow(hWnd);
@@ -2979,6 +3231,7 @@ static LRESULT CALLBACK CloudBackupWndProc(HWND hWnd, UINT msg,
 
 static void show_cloud_backup(HWND hParent)
 {
+    if (focus_existing_window("KSC_CloudBackup")) return;
     static BOOL registered = FALSE;
     if (!registered) {
         WNDCLASS wc = {0};
@@ -3029,6 +3282,7 @@ static void show_mouse_clicker(HWND hParent)
 }
 
 typedef struct {
+    HWND hDlg;
     HWND hSeqLbl;
     HWND hMinEdit, hSecEdit, hMsEdit;
     HWND hOffsetEdit;
@@ -3070,7 +3324,7 @@ static char *parse_next(char *str, char **ctx)
 
 static void update_readable_label(KbSimData *d)
 {
-    char hexText[2048], readable[1024] = "";
+    char hexText[2048], readable[2048] = "";
     GetWindowText(d->hSeqLbl, hexText, sizeof(hexText));
     if (hexText[0] == '\0') {
         SetWindowText(d->hReadableLbl, "");
@@ -3086,6 +3340,8 @@ static void update_readable_label(KbSimData *d)
             int packed = (int)strtol(tok, nullptr, 16);
             char tmp[64];
             format_shortcut(packed, tmp, sizeof(tmp));
+            size_t need = (cnt > 0 ? 2 : 0) + strlen(tmp) + 1;
+            if (strlen(readable) + need >= sizeof(readable)) break;
             if (cnt > 0) strcat(readable, ", ");
             strcat(readable, tmp);
             cnt++;
@@ -3120,7 +3376,7 @@ static DWORD WINAPI KbSimThreadProc(LPVOID param)
     int offsetMs   = d->offsetMs;
     int continuous = d->isContinuous;
     int limit      = d->limitCount;
-    int keys[64];
+    int keys[128];
     int nKeys = 0;
 
     /* parse cached hex sequence without strtok */
@@ -3128,10 +3384,9 @@ static DWORD WINAPI KbSimThreadProc(LPVOID param)
         char buf[2048], *ctx = nullptr;
         strcpy(buf, d->cachedSeq);
         char *tok = parse_next(buf, &ctx);
-        while (tok && nKeys < 64) {
+        while (tok && nKeys < 128) {
             while (*tok == ' ') tok++;
-            if ((tok[0] == '0' && (tok[1] == 'x' || tok[1] == 'X')) ||
-                (tok[0] == '0' && tok[1] == 'X'))
+            if (tok[0] == '0' && (tok[1] == 'x' || tok[1] == 'X'))
                 keys[nKeys++] = (int)strtol(tok, nullptr, 16);
             tok = parse_next(nullptr, &ctx);
         }
@@ -3139,25 +3394,28 @@ static DWORD WINAPI KbSimThreadProc(LPVOID param)
 
     if (nKeys == 0 || intervalMs < 10) {
         d->running = FALSE;
+        if (d->hDlg && IsWindow(d->hDlg))
+            PostMessage(d->hDlg, WM_KBSIM_CMD, 2, 0);
         return 0;
     }
 
+    BOOL finishedCleanly = FALSE;
     while (d->running) {
         for (int i = 0; i < nKeys; i++) {
             if (!d->running) break;
 
             int packed = keys[i];
-            int vk = packed & 0xFF;
+            int vk = packed & 0xFFFF;
             int mod = (packed >> 16) & 0xFFFF;
 
             /* modifiers down */
             INPUT modDown[4];
             int nM = 0;
             memset(modDown, 0, sizeof(modDown));
-            if (mod & MOD_CONTROL) { modDown[nM].type = INPUT_KEYBOARD; modDown[nM].ki.wVk = VK_CONTROL; nM++; }
-            if (mod & MOD_SHIFT)   { modDown[nM].type = INPUT_KEYBOARD; modDown[nM].ki.wVk = VK_SHIFT; nM++; }
-            if (mod & MOD_ALT)     { modDown[nM].type = INPUT_KEYBOARD; modDown[nM].ki.wVk = VK_MENU; nM++; }
-            if (mod & MOD_WIN)     { modDown[nM].type = INPUT_KEYBOARD; modDown[nM].ki.wVk = VK_LWIN; nM++; }
+            if (mod & MOD_CONTROL) { modDown[nM].type = INPUT_KEYBOARD; modDown[nM].ki.wVk = VK_CONTROL; modDown[nM].ki.dwExtraInfo = KSC_INJECTED_MAGIC; nM++; }
+            if (mod & MOD_SHIFT)   { modDown[nM].type = INPUT_KEYBOARD; modDown[nM].ki.wVk = VK_SHIFT;   modDown[nM].ki.dwExtraInfo = KSC_INJECTED_MAGIC; nM++; }
+            if (mod & MOD_ALT)     { modDown[nM].type = INPUT_KEYBOARD; modDown[nM].ki.wVk = VK_MENU;    modDown[nM].ki.dwExtraInfo = KSC_INJECTED_MAGIC; nM++; }
+            if (mod & MOD_WIN)     { modDown[nM].type = INPUT_KEYBOARD; modDown[nM].ki.wVk = VK_LWIN;    modDown[nM].ki.dwExtraInfo = KSC_INJECTED_MAGIC; nM++; }
             if (nM > 0) SendInput(nM, modDown, sizeof(INPUT));
 
             if (!d->running) { /* release mods and exit */
@@ -3173,6 +3431,7 @@ static DWORD WINAPI KbSimThreadProc(LPVOID param)
             memset(&kd, 0, sizeof(kd));
             kd.type = INPUT_KEYBOARD;
             kd.ki.wVk = (WORD)vk;
+            kd.ki.dwExtraInfo = KSC_INJECTED_MAGIC;
             SendInput(1, &kd, sizeof(INPUT));
             Sleep(10);
 
@@ -3204,6 +3463,7 @@ static DWORD WINAPI KbSimThreadProc(LPVOID param)
         d->cyclesSoFar++;
         if (!continuous && d->cyclesSoFar >= limit) {
             d->running = FALSE;
+            finishedCleanly = TRUE;
             break;
         }
 
@@ -3222,7 +3482,8 @@ static DWORD WINAPI KbSimThreadProc(LPVOID param)
         }
     }
 
-    PostMessage(GetParent(d->hBtnStart), WM_KBSIM_CMD, 2, 0);
+    if (finishedCleanly && d->hDlg && IsWindow(d->hDlg))
+        PostMessage(d->hDlg, WM_KBSIM_CMD, 2, 0);
     return 0;
 }
 
@@ -3233,6 +3494,7 @@ static LRESULT CALLBACK KeyboardSimWndProc(HWND hWnd, UINT msg,
     case WM_CREATE: {
         KbSimData *d = calloc(1, sizeof(KbSimData));
         if (!d) return -1;
+        d->hDlg = hWnd;
         d->hotkeyStartId = HOTKEY_ID_START_KBSIM;
         d->hotkeyStopId  = HOTKEY_ID_STOP_KBSIM;
         {
@@ -3382,7 +3644,7 @@ static LRESULT CALLBACK KeyboardSimWndProc(HWND hWnd, UINT msg,
 
         /* load saved sequence */
         {
-            char buf[1024];
+            char buf[2048];
             extern void db_get_setting_str(const char *k,
                 const char *d, char *o, int s);
             db_get_setting_str("kbsim_sequence", "", buf, sizeof(buf));
@@ -3399,9 +3661,10 @@ static LRESULT CALLBACK KeyboardSimWndProc(HWND hWnd, UINT msg,
         }
         SetDlgItemInt(hWnd, IDC_KBSIM_OFFSET,
             db_get_setting_int("kbsim_random_offset", 0), FALSE);
-        if (db_get_setting_int("kbsim_continuous", 1))
+        if (db_get_setting_int("kbsim_continuous", 1)) {
             SendMessage(d->hContinuous, BM_SETCHECK, BST_CHECKED, 0);
-        else {
+            EnableWindow(d->hLimitedCount, FALSE);
+        } else {
             SendMessage(d->hLimited, BM_SETCHECK, BST_CHECKED, 0);
             EnableWindow(d->hLimitedCount, TRUE);
         }
@@ -3440,28 +3703,15 @@ static LRESULT CALLBACK KeyboardSimWndProc(HWND hWnd, UINT msg,
         return 0;
     }
 
-    case WM_ERASEBKGND: {
-        BOOL dark = db_get_setting_int("dark_mode", 0);
-        if (dark && g_hDarkBrush) {
-            RECT rc;
-            GetClientRect(hWnd, &rc);
-            FillRect((HDC)wParam, &rc, g_hDarkBrush);
-            return TRUE;
-        }
+    case WM_ERASEBKGND:
+        if (handle_dark_erasebkgnd(hWnd, (HDC)wParam)) return TRUE;
         return DefWindowProc(hWnd, msg, wParam, lParam);
-    }
 
     case WM_CTLCOLORBTN:
-    case WM_CTLCOLORSTATIC: {
-        BOOL dark = db_get_setting_int("dark_mode", 0);
-        if (dark && g_hDarkBrush) {
-            HDC hdc = (HDC)wParam;
-            SetBkMode(hdc, TRANSPARENT);
-            SetTextColor(hdc, RGB(230, 230, 230));
-            return (LRESULT)g_hDarkBrush;
-        }
-        return DefWindowProc(hWnd, msg, wParam, lParam);
-    }
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX:
+        return handle_dark_ctlcolor(hWnd, msg, wParam, lParam);
 
     case WM_KEYDOWN:
     case WM_SYSKEYDOWN: {
@@ -3490,14 +3740,17 @@ static LRESULT CALLBACK KeyboardSimWndProc(HWND hWnd, UINT msg,
                 char hex[16], curText[2048] = "";
                 sprintf(hex, "0x%08X", packed);
                 GetWindowText(d->hSeqLbl, curText, sizeof(curText));
-                if (curText[0]) strcat(curText, ",");
-                strcat(curText, hex);
-                SetWindowText(d->hSeqLbl, curText);
-                update_readable_label(d);
-                extern void db_set_setting_str(const char *k,
-                    const char *v);
-                db_set_setting_str("kbsim_sequence", curText);
-                if (d->keyCount >= 128) {
+                if (strlen(curText) + strlen(hex) + 2 < sizeof(curText)) {
+                    if (curText[0]) strcat(curText, ",");
+                    strcat(curText, hex);
+                    SetWindowText(d->hSeqLbl, curText);
+                    update_readable_label(d);
+                    extern void db_set_setting_str(const char *k,
+                        const char *v);
+                    db_set_setting_str("kbsim_sequence", curText);
+                }
+                if (d->keyCount >= 128 ||
+                    strlen(curText) + 12 >= sizeof(curText)) {
                     d->capturing = 0;
                     SetWindowText(d->hRecordBtn, "Record");
                 }
@@ -3536,6 +3789,11 @@ static LRESULT CALLBACK KeyboardSimWndProc(HWND hWnd, UINT msg,
         int cmd = (int)wParam;
         if (cmd == 0 && !d->running) {
             /* populate cached settings before spawning thread */
+            if (d->hThread) {
+                WaitForSingleObject(d->hThread, 1000);
+                CloseHandle(d->hThread);
+                d->hThread = nullptr;
+            }
             char seqCheck[2048];
             GetWindowText(d->hSeqLbl, seqCheck, sizeof(seqCheck));
             if (seqCheck[0] == '\0') return 0;
@@ -3546,6 +3804,7 @@ static LRESULT CALLBACK KeyboardSimWndProc(HWND hWnd, UINT msg,
                 nullptr, FALSE) * 1000
                 + GetDlgItemInt(hWnd, IDC_KBSIM_INT_MS,
                 nullptr, FALSE);
+            if (d->intervalMs < 10) d->intervalMs = 10;
             d->offsetMs = GetDlgItemInt(hWnd, IDC_KBSIM_OFFSET,
                                          nullptr, FALSE);
             d->isContinuous = (SendMessage(d->hContinuous,
@@ -3626,7 +3885,7 @@ static LRESULT CALLBACK KeyboardSimWndProc(HWND hWnd, UINT msg,
             }
             if (id == IDC_KBSIM_START) {
                 /* check sequence not empty */
-                char seqCheck[1024];
+                char seqCheck[2048];
                 GetWindowText(d->hSeqLbl, seqCheck, sizeof(seqCheck));
                 if (seqCheck[0] == '\0') {
                     MessageBox(hWnd,
@@ -3710,7 +3969,15 @@ static LRESULT CALLBACK KeyboardSimWndProc(HWND hWnd, UINT msg,
     case WM_DESTROY: {
         KbSimData *d = (KbSimData *)GetWindowLongPtr(
             hWnd, GWLP_USERDATA);
-        if (d) free(d);
+        if (d) {
+            d->running = FALSE;
+            if (d->hThread) {
+                WaitForSingleObject(d->hThread, 3000);
+                CloseHandle(d->hThread);
+                d->hThread = nullptr;
+            }
+            free(d);
+        }
         return 0;
     }
     }
@@ -3866,22 +4133,15 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg,
         return DefWindowProc(hWnd, msg, wParam, lParam);
 
     case WM_NOTIFY: {
+        LRESULT cdRes = 0;
+        if (handle_dark_lv_customdraw(IDC_LISTVIEW, lParam, &cdRes))
+            return cdRes;
         NMHDR *nmh = (NMHDR *)lParam;
-        if (nmh->idFrom == IDC_LISTVIEW && nmh->code == NM_CUSTOMDRAW) {
-            if (g_dark_mode) {
-                NMLVCUSTOMDRAW *lvcd = (NMLVCUSTOMDRAW *)lParam;
-                switch (lvcd->nmcd.dwDrawStage) {
-                case CDDS_PREPAINT:
-                    SetWindowLongPtr(hWnd, DWLP_MSGRESULT,
-                                     CDRF_NOTIFYITEMDRAW);
-                    return TRUE;
-                case CDDS_ITEMPREPAINT:
-                    lvcd->clrText   = RGB(212, 212, 212);
-                    lvcd->clrTextBk = RGB(37, 37, 38);
-                    SetWindowLongPtr(hWnd, DWLP_MSGRESULT, CDRF_NEWFONT);
-                    return TRUE;
-                }
-            }
+        if (nmh->idFrom == IDC_LISTVIEW && nmh->code == LVN_COLUMNCLICK) {
+            NMLISTVIEW *pnm = (NMLISTVIEW *)lParam;
+            listview_toggle_sort(g_hListView, &g_mainSort, pnm->iSubItem,
+                                 pnm->iSubItem == 1);
+            return 0;
         }
         break;
     }
@@ -3995,6 +4255,7 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg,
             db_set_setting_int("keylogger_enabled", newv);
             keyhook_set_keylogger_enabled(newv);
             if (newv) keylog_open();
+            else { keylog_flush_events(); keylog_close(); }
             MessageBox(hWnd,
                 newv ? "Keylogger enabled." : "Keylogger disabled.",
                 "Keylogger", MB_OK | MB_ICONINFORMATION);
@@ -4004,28 +4265,79 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg,
             show_cloud_backup(hWnd);
             break;
         case IDM_BACKUP_DB: {
-            char appdata[MAX_PATH];
-            if (GetEnvironmentVariable("APPDATA", appdata, MAX_PATH) <= 0)
-                break;
-            char dir[256];
-            sprintf(dir, "%s\\KSC", appdata);
+            char dir[MAX_PATH] = "";
+            db_get_db_dir(dir, sizeof(dir));
+            if (dir[0] == '\0') break;
             SYSTEMTIME st;
             GetLocalTime(&st);
             char ts[32];
             sprintf(ts, "%04d%02d%02d_%02d%02d%02d",
                     st.wYear, st.wMonth, st.wDay,
                     st.wHour, st.wMinute, st.wSecond);
-            char src[300], dst[300];
-            sprintf(src, "%s\\ksc.db", dir);
-            sprintf(dst, "%s\\ksc_backup_%s.db", dir, ts);
-            if (db_backup_safe(dst)) {
-                char klogSrc[300], klogDst[300];
-                sprintf(klogSrc, "%s\\ksc_keylog.db", dir);
-                sprintf(klogDst, "%s\\ksc_keylog_backup_%s.db",
-                        dir, ts);
-                CopyFile(klogSrc, klogDst, TRUE);
-                MessageBox(hWnd, "Backup created successfully.",
-                           "Backup", MB_OK | MB_ICONINFORMATION);
+            BOOL preferZip = cloudsync_get_compress() ? TRUE : FALSE;
+            char filePath[MAX_PATH] = "";
+            snprintf(filePath, sizeof(filePath), "%s\\ksc_backup_%s.%s",
+                     dir, ts, preferZip ? "zip" : "db");
+
+            OPENFILENAME ofn = {};
+            ofn.lStructSize = sizeof(ofn);
+            ofn.hwndOwner = hWnd;
+            ofn.lpstrFilter =
+                "ZIP Archive (*.zip)\0*.zip\0SQLite Database (*.db)\0*.db\0\0";
+            ofn.nFilterIndex = preferZip ? 1 : 2;
+            ofn.lpstrFile = filePath;
+            ofn.nMaxFile = MAX_PATH;
+            ofn.lpstrInitialDir = dir;
+            ofn.lpstrDefExt = preferZip ? "zip" : "db";
+            ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
+            if (!GetSaveFileName(&ofn)) break;
+
+            const char *dot = strrchr(filePath, '.');
+            bool wantZip = (dot && _stricmp(dot, ".zip") == 0);
+            int ok = 0;
+            if (wantZip) {
+                char tmpDb[MAX_PATH + 32];
+                snprintf(tmpDb, sizeof(tmpDb), "%s.tmpdb", filePath);
+                if (db_backup_safe(tmpDb)) {
+                    ok = zip_compress_file(tmpDb, filePath, "ksc.db") ? 1 : 0;
+                    DeleteFileA(tmpDb);
+                }
+            } else {
+                ok = db_backup_safe(filePath);
+            }
+
+            if (ok) {
+                bool klogOk = true;
+                char klogSrc[MAX_PATH + 32];
+                snprintf(klogSrc, sizeof(klogSrc), "%s\\ksc_keylog.db", dir);
+                if (GetFileAttributesA(klogSrc) != INVALID_FILE_ATTRIBUTES) {
+                    char base[MAX_PATH] = "";
+                    size_t stemLen = dot ? (size_t)(dot - filePath) : strlen(filePath);
+                    if (stemLen >= sizeof(base)) stemLen = sizeof(base) - 1;
+                    memcpy(base, filePath, stemLen);
+                    base[stemLen] = '\0';
+
+                    if (wantZip) {
+                        char tmpKlog[MAX_PATH + 40], klogZip[MAX_PATH + 40];
+                        snprintf(tmpKlog, sizeof(tmpKlog), "%s_keylog.tmpdb", base);
+                        snprintf(klogZip, sizeof(klogZip), "%s_keylog.zip", base);
+                        if (keylog_backup_safe(tmpKlog)) {
+                            klogOk = zip_compress_file(tmpKlog, klogZip, "ksc_keylog.db");
+                            DeleteFileA(tmpKlog);
+                        } else {
+                            klogOk = false;
+                        }
+                    } else {
+                        char klogDst[MAX_PATH + 40];
+                        snprintf(klogDst, sizeof(klogDst), "%s_keylog.db", base);
+                        klogOk = (keylog_backup_safe(klogDst) != 0);
+                    }
+                }
+                MessageBox(hWnd,
+                    klogOk ? "Backup created successfully."
+                           : "Main database backed up, but keylogger backup failed.",
+                    "Backup",
+                    MB_OK | (klogOk ? MB_ICONINFORMATION : MB_ICONWARNING));
             } else {
                 MessageBox(hWnd,
                     "Backup failed. Is the database in use?",
@@ -4034,28 +4346,73 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg,
             break;
         }
         case IDM_RESTORE_DB: {
-            OPENFILENAME ofn;
+            OPENFILENAME ofn = {};
             char filePath[MAX_PATH] = "";
-            ZeroMemory(&ofn, sizeof(ofn));
             ofn.lStructSize = sizeof(ofn);
             ofn.hwndOwner = hWnd;
-            ofn.lpstrFilter = "Database files (*.db)\0*.db\0\0";
+            ofn.lpstrFilter =
+                "Database & ZIP backups (*.db;*.zip)\0*.db;*.zip\0"
+                "SQLite Database (*.db)\0*.db\0ZIP Archive (*.zip)\0*.zip\0\0";
             ofn.lpstrFile = filePath;
             ofn.nMaxFile = MAX_PATH;
             ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
             if (!GetOpenFileName(&ofn)) break;
+
             int res = MessageBox(hWnd,
                 "This will replace all current statistics.\n"
                 "ksc will exit. Restart manually.\n\nContinue?",
                 "Restore Database", MB_YESNO | MB_ICONWARNING);
             if (res != IDYES) break;
-            char appdata2[MAX_PATH];
-            if (GetEnvironmentVariable("APPDATA", appdata2, MAX_PATH) <= 0)
+
+            char dir[MAX_PATH] = "";
+            db_get_db_dir(dir, sizeof(dir));
+            if (dir[0] == '\0') break;
+
+            const char *dot = strrchr(filePath, '.');
+            bool isZip = (dot && _stricmp(dot, ".zip") == 0);
+            char restoreSrc[MAX_PATH + 32];
+            bool cleanupTemp = false;
+            if (isZip) {
+                snprintf(restoreSrc, sizeof(restoreSrc),
+                         "%s\\ksc_restore_tmp.db", dir);
+                if (!zip_extract_first_file(filePath, restoreSrc)) {
+                    MessageBox(hWnd,
+                        "Failed to extract database from ZIP archive.",
+                        "Restore", MB_OK | MB_ICONERROR);
+                    break;
+                }
+                cleanupTemp = true;
+            } else {
+                snprintf(restoreSrc, sizeof(restoreSrc), "%s", filePath);
+            }
+
+            FILE *vf = fopen(restoreSrc, "rb");
+            char hdr[16] = {};
+            size_t nr = vf ? fread(hdr, 1, sizeof(hdr), vf) : 0;
+            if (vf) fclose(vf);
+            if (nr != sizeof(hdr) || memcmp(hdr, "SQLite format 3", 15) != 0) {
+                if (cleanupTemp) DeleteFileA(restoreSrc);
+                MessageBox(hWnd,
+                    "Selected file is not a valid SQLite database.",
+                    "Restore", MB_OK | MB_ICONERROR);
                 break;
-            char dest[300];
-            sprintf(dest, "%s\\KSC\\ksc.db", appdata2);
+            }
+
+            keyhook_stop();
             db_close();
-            if (CopyFile(filePath, dest, FALSE)) {
+            keylog_flush_events();
+            keylog_close();
+
+            char dest[MAX_PATH + 32], wal[MAX_PATH + 40], shm[MAX_PATH + 40];
+            snprintf(dest, sizeof(dest), "%s\\ksc.db", dir);
+            snprintf(wal,  sizeof(wal),  "%s\\ksc.db-wal", dir);
+            snprintf(shm,  sizeof(shm),  "%s\\ksc.db-shm", dir);
+            DeleteFileA(wal);
+            DeleteFileA(shm);
+
+            BOOL copied = CopyFile(restoreSrc, dest, FALSE);
+            if (cleanupTemp) DeleteFileA(restoreSrc);
+            if (copied) {
                 MessageBox(hWnd,
                     "Database restored. ksc will now exit.\n"
                     "Please restart ksc manually.",
@@ -4100,6 +4457,7 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg,
         if (g_hDarkBrush) { DeleteObject(g_hDarkBrush); g_hDarkBrush = nullptr; }
         if (g_hLvBrush)   { DeleteObject(g_hLvBrush);   g_hLvBrush = nullptr;   }
         KillTimer(hWnd, ID_TIMER_REFRESH);
+        KillTimer(hWnd, ID_TIMER_CLOUD_SYNC);
         PostQuitMessage(0);
         return 0;
     }

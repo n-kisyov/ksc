@@ -1,6 +1,7 @@
 #include "tray.h"
 #include "ksc_private.h"
 #include "database.h"
+#include "keyhook.h"
 
 static NOTIFYICONDATA g_nid;
 
@@ -54,8 +55,11 @@ void tray_show_menu(HWND hWnd, [[maybe_unused]] UINT id)
 void tray_update_tip(HWND hWnd, UINT id)
 {
     int64_t today = db_get_today_count();
+    int wpm = 0, peak = 0;
+    keyhook_get_wpm(&wpm, &peak);
     char tip[128];
-    sprintf(tip, "ksc - %lld today", (long long)today);
+    snprintf(tip, sizeof(tip), "ksc - %lld today (%d WPM)",
+             (long long)today, wpm);
 
     NOTIFYICONDATA nid = {
         .cbSize = sizeof(NOTIFYICONDATA),

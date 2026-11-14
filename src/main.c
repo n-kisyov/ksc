@@ -8,11 +8,24 @@
 #include "tray.h"
 
 int WINAPI WinMain(HINSTANCE hInstance, [[maybe_unused]] HINSTANCE hPrevInstance,
-                   [[maybe_unused]] LPSTR lpCmdLine, int nCmdShow)
+                   LPSTR lpCmdLine, int nCmdShow)
 {
-    [[maybe_unused]] HANDLE hMutex = CreateMutex(nullptr, TRUE, "KSC_SingleInstance");
+    HANDLE hMutex = CreateMutex(nullptr, TRUE, "KSC_SingleInstance");
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        HWND hExisting = FindWindow("KSC_MainWindow", nullptr);
+        if (hExisting) {
+            if (!IsWindowVisible(hExisting))
+                ShowWindow(hExisting, SW_RESTORE);
+            else if (IsIconic(hExisting))
+                ShowWindow(hExisting, SW_RESTORE);
+            SetForegroundWindow(hExisting);
+        }
+        if (hMutex) CloseHandle(hMutex);
         return 0;
+    }
+
+    if (lpCmdLine && strstr(lpCmdLine, "--portable")) {
+        db_set_portable_mode(true);
     }
 
     INITCOMMONCONTROLSEX icex = {
@@ -24,6 +37,7 @@ int WINAPI WinMain(HINSTANCE hInstance, [[maybe_unused]] HINSTANCE hPrevInstance
     if (!db_init()) {
         MessageBox(nullptr, "Failed to initialize database.",
                    "KSC Error", MB_ICONERROR);
+        if (hMutex) CloseHandle(hMutex);
         return 1;
     }
 
@@ -43,6 +57,7 @@ int WINAPI WinMain(HINSTANCE hInstance, [[maybe_unused]] HINSTANCE hPrevInstance
         keylog_flush_events();
         keylog_close();
         db_close();
+        if (hMutex) CloseHandle(hMutex);
         return 1;
     }
 
@@ -101,6 +116,7 @@ int WINAPI WinMain(HINSTANCE hInstance, [[maybe_unused]] HINSTANCE hPrevInstance
         keylog_flush_events();
         keylog_close();
         db_close();
+        if (hMutex) CloseHandle(hMutex);
         return 1;
     }
 
@@ -125,6 +141,7 @@ int WINAPI WinMain(HINSTANCE hInstance, [[maybe_unused]] HINSTANCE hPrevInstance
     tray_cleanup(hWnd, TRAY_ID);
     db_close();
     keylog_close();
+    if (hMutex) CloseHandle(hMutex);
 
     return (int)msg.wParam;
 }
