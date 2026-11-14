@@ -41,7 +41,7 @@ static DWORD WINAPI telegram_thread(LPVOID param)
     if (!hConnect) { WinHttpCloseHandle(hSession); free(msg); return 0; }
 
     HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"POST", wpath,
-        NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+        nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
         WINHTTP_FLAG_SECURE);
     if (!hRequest) { WinHttpCloseHandle(hConnect);
         WinHttpCloseHandle(hSession); free(msg); return 0; }
@@ -54,7 +54,7 @@ static DWORD WINAPI telegram_thread(LPVOID param)
     DWORD bodyLen = (DWORD)strlen(json);
     WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS,
         0, (LPVOID)json, bodyLen, bodyLen, 0);
-    WinHttpReceiveResponse(hRequest, NULL);
+    WinHttpReceiveResponse(hRequest, nullptr);
 
     /* read response (ignored) */
     char buf[512];
@@ -72,8 +72,8 @@ static DWORD WINAPI telegram_thread(LPVOID param)
 
 void telegram_send(const char *msg)
 {
-    HANDLE h = CreateThread(NULL, 0, telegram_thread,
-                             _strdup(msg), 0, NULL);
+    HANDLE h = CreateThread(nullptr, 0, telegram_thread,
+                             _strdup(msg), 0, nullptr);
     if (h) CloseHandle(h);
 }
 

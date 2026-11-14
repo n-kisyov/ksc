@@ -3,11 +3,11 @@
 #include "keylogdb.h"
 #include "ksc_private.h"
 
-static HHOOK g_hKbHook = NULL;
-static HHOOK g_hMouseHook = NULL;
-static HANDLE g_thread = NULL;
+static HHOOK g_hKbHook = nullptr;
+static HHOOK g_hMouseHook = nullptr;
+static HANDLE g_thread = nullptr;
 static DWORD g_thread_id = 0;
-static volatile BOOL g_keyloggerEnabled = FALSE;
+static volatile bool g_keyloggerEnabled = false;
 
 const char *keyhook_get_name(unsigned int vk_code)
 {
@@ -153,7 +153,7 @@ static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam,
                 keylog_queue_event(name, p->vkCode, app);
         }
     }
-    return CallNextHookEx(NULL, nCode, wParam, lParam);
+    return CallNextHookEx(nullptr, nCode, wParam, lParam);
 }
 
 static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam,
@@ -179,33 +179,31 @@ static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam,
                                     VK_RBUTTON, app);
         }
     }
-    return CallNextHookEx(NULL, nCode, wParam, lParam);
+    return CallNextHookEx(nullptr, nCode, wParam, lParam);
 }
 
-static DWORD WINAPI HookThreadProc(LPVOID lpParam)
+static DWORD WINAPI HookThreadProc([[maybe_unused]] LPVOID lpParam)
 {
-    (void)lpParam;
-
     g_hKbHook = SetWindowsHookEx(WH_KEYBOARD_LL, LowLevelKeyboardProc,
-                                  GetModuleHandle(NULL), 0);
+                                  GetModuleHandle(nullptr), 0);
     g_hMouseHook = SetWindowsHookEx(WH_MOUSE_LL, LowLevelMouseProc,
-                                     GetModuleHandle(NULL), 0);
+                                     GetModuleHandle(nullptr), 0);
 
-    MSG msg;
-    while (GetMessage(&msg, NULL, 0, 0) > 0) {
+    MSG msg = {};
+    while (GetMessage(&msg, nullptr, 0, 0) > 0) {
         TranslateMessage(&msg);
         DispatchMessage(&msg);
     }
 
-    if (g_hMouseHook) { UnhookWindowsHookEx(g_hMouseHook); g_hMouseHook = NULL; }
-    if (g_hKbHook)    { UnhookWindowsHookEx(g_hKbHook);    g_hKbHook = NULL; }
+    if (g_hMouseHook) { UnhookWindowsHookEx(g_hMouseHook); g_hMouseHook = nullptr; }
+    if (g_hKbHook)    { UnhookWindowsHookEx(g_hKbHook);    g_hKbHook = nullptr; }
     return 0;
 }
 
-int keyhook_start(void)
+bool keyhook_start(void)
 {
-    g_thread = CreateThread(NULL, 0, HookThreadProc, NULL, 0, &g_thread_id);
-    return g_thread != NULL;
+    g_thread = CreateThread(nullptr, 0, HookThreadProc, nullptr, 0, &g_thread_id);
+    return g_thread != nullptr;
 }
 
 void keyhook_stop(void)
@@ -214,12 +212,12 @@ void keyhook_stop(void)
         PostThreadMessage(g_thread_id, WM_QUIT, 0, 0);
         WaitForSingleObject(g_thread, 5000);
         CloseHandle(g_thread);
-        g_thread = NULL;
+        g_thread = nullptr;
         g_thread_id = 0;
     }
 }
 
-void keyhook_set_keylogger_enabled(int enabled)
+void keyhook_set_keylogger_enabled(bool enabled)
 {
-    g_keyloggerEnabled = enabled ? TRUE : FALSE;
+    g_keyloggerEnabled = enabled;
 }

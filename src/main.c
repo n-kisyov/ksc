@@ -7,31 +7,29 @@
 #include "gui.h"
 #include "tray.h"
 
-int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
-                   LPSTR lpCmdLine, int nCmdShow)
+int WINAPI WinMain(HINSTANCE hInstance, [[maybe_unused]] HINSTANCE hPrevInstance,
+                   [[maybe_unused]] LPSTR lpCmdLine, int nCmdShow)
 {
-    (void)hPrevInstance;
-    (void)lpCmdLine;
-
-    HANDLE hMutex = CreateMutex(NULL, TRUE, "KSC_SingleInstance");
+    [[maybe_unused]] HANDLE hMutex = CreateMutex(nullptr, TRUE, "KSC_SingleInstance");
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         return 0;
     }
 
-    INITCOMMONCONTROLSEX icex;
-    icex.dwSize = sizeof(icex);
-    icex.dwICC = ICC_LISTVIEW_CLASSES | ICC_DATE_CLASSES;
+    INITCOMMONCONTROLSEX icex = {
+        .dwSize = sizeof(icex),
+        .dwICC = ICC_LISTVIEW_CLASSES | ICC_DATE_CLASSES
+    };
     InitCommonControlsEx(&icex);
 
     if (!db_init()) {
-        MessageBox(NULL, "Failed to initialize database.",
+        MessageBox(nullptr, "Failed to initialize database.",
                    "KSC Error", MB_ICONERROR);
         return 1;
     }
 
     if (db_get_setting_int("keylogger_enabled", 0)) {
         keylog_open();
-        keyhook_set_keylogger_enabled(1);
+        keyhook_set_keylogger_enabled(true);
     }
 
     cloudsync_init();
@@ -94,7 +92,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     }
 
     if (!keyhook_start()) {
-        MessageBox(NULL,
+        MessageBox(nullptr,
                    "Failed to start keyboard hook.\n\n"
                    "Try running as administrator or check your permissions.",
                    "KSC Error", MB_ICONERROR);
@@ -115,8 +113,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         UpdateWindow(hWnd);
     }
 
-    MSG msg;
-    while (GetMessage(&msg, NULL, 0, 0)) {
+    MSG msg = {};
+    while (GetMessage(&msg, nullptr, 0, 0)) {
         TranslateMessage(&msg);
         DispatchMessage(&msg);
     }

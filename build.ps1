@@ -25,7 +25,7 @@ if (-not (Test-Path $ucrtWindres)) {
 $env:PATH = "$ucrtBin;$env:PATH"
 
 Write-Host "============================================"
-Write-Host "  KSC - Keystroke Counter Build Script"
+Write-Host "  KSC - Keystroke Counter Build Script (C23)"
 Write-Host "============================================"
 Write-Host ""
 

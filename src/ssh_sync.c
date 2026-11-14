@@ -22,7 +22,7 @@ static char g_sshHost[256];
 static char g_sshUser[128];
 static int  g_sshPort = 22;
 
-int ssh_sync_is_configured(void)
+bool ssh_sync_is_configured(void)
 {
     return g_sshHost[0] != '\0';
 }
@@ -83,15 +83,15 @@ static void get_ssh_pass_path(char *buf, int bufsz)
 int ssh_sync_upload(const char *localPath, const char *remoteName)
 {
     SOCKET sock = INVALID_SOCKET;
-    LIBSSH2_SESSION *session = NULL;
-    LIBSSH2_SFTP *sftp = NULL;
-    LIBSSH2_SFTP_HANDLE *handle = NULL;
+    LIBSSH2_SESSION *session = nullptr;
+    LIBSSH2_SFTP *sftp = nullptr;
+    LIBSSH2_SFTP_HANDLE *handle = nullptr;
     int result = 0;
 
     ensure_winsock();
 
     /* resolve host */
-    struct addrinfo hints = {0}, *ai = NULL;
+    struct addrinfo hints = {}, *ai = nullptr;
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
     char portStr[16];
@@ -110,7 +110,7 @@ int ssh_sync_upload(const char *localPath, const char *remoteName)
         struct timeval tv = {10, 0};
         FD_ZERO(&wfds);
         FD_SET(sock, &wfds);
-        int sel = select(0, NULL, &wfds, NULL, &tv);
+        int sel = select(0, nullptr, &wfds, nullptr, &tv);
         mode = 0;
         ioctlsocket(sock, FIONBIO, &mode);
         if (sel <= 0) { closesocket(sock); freeaddrinfo(ai); goto done; }
@@ -130,18 +130,18 @@ int ssh_sync_upload(const char *localPath, const char *remoteName)
         char passPath[MAX_PATH];
         get_ssh_pass_path(passPath, sizeof(passPath));
         HANDLE hf = CreateFile(passPath, GENERIC_READ,
-            FILE_SHARE_READ, NULL, OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL, NULL);
+            FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL, nullptr);
         char password[256] = "";
         if (hf != INVALID_HANDLE_VALUE) {
-            DWORD sz = GetFileSize(hf, NULL);
+            DWORD sz = GetFileSize(hf, nullptr);
             if (sz > 0 && sz < 4096) {
                 BYTE *enc = malloc(sz);
                 DWORD rd;
-                ReadFile(hf, enc, sz, &rd, NULL);
+                ReadFile(hf, enc, sz, &rd, nullptr);
                 DATA_BLOB in  = { sz, enc };
-                DATA_BLOB out = {0};
-                if (CryptUnprotectData(&in, NULL, NULL, NULL, NULL,
+                DATA_BLOB out = {};
+                if (CryptUnprotectData(&in, nullptr, nullptr, nullptr, nullptr,
                                        CRYPTPROTECT_UI_FORBIDDEN, &out)) {
                     strncpy(password, (char *)out.pbData, 255);
                     password[255] = '\0';
@@ -171,8 +171,8 @@ int ssh_sync_upload(const char *localPath, const char *remoteName)
 
     /* open local file */
     HANDLE hLocal = CreateFile(localPath, GENERIC_READ,
-        FILE_SHARE_READ, NULL, OPEN_EXISTING,
-        FILE_ATTRIBUTE_NORMAL, NULL);
+        FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL, nullptr);
     if (hLocal == INVALID_HANDLE_VALUE) goto done;
 
     handle = libssh2_sftp_open(sftp, remotePath,
@@ -184,7 +184,7 @@ int ssh_sync_upload(const char *localPath, const char *remoteName)
     {
         char buf[32768];
         DWORD rd = 0;
-        while (ReadFile(hLocal, buf, sizeof(buf), &rd, NULL) && rd > 0) {
+        while (ReadFile(hLocal, buf, sizeof(buf), &rd, nullptr) && rd > 0) {
             int written = 0;
             while (written < (int)rd) {
                 int rc = libssh2_sftp_write(handle, buf + written,
@@ -211,12 +211,12 @@ static DWORD WINAPI ssh_test_thread(LPVOID param)
 {
     HWND hParent = (HWND)param;
     SOCKET sock = INVALID_SOCKET;
-    LIBSSH2_SESSION *session = NULL;
+    LIBSSH2_SESSION *session = nullptr;
     char *msg = "Connection failed: unknown error";
 
     ensure_winsock();
 
-    struct addrinfo hints = {0}, *ai = NULL;
+    struct addrinfo hints = {}, *ai = nullptr;
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
     char portStr[16];
@@ -237,7 +237,7 @@ static DWORD WINAPI ssh_test_thread(LPVOID param)
         struct timeval tv = {10, 0};
         FD_ZERO(&wfds);
         FD_SET(sock, &wfds);
-        int sel = select(0, NULL, &wfds, NULL, &tv);
+        int sel = select(0, nullptr, &wfds, nullptr, &tv);
         mode = 0;
         ioctlsocket(sock, FIONBIO, &mode);
         if (sel <= 0) {
@@ -261,18 +261,18 @@ static DWORD WINAPI ssh_test_thread(LPVOID param)
         char passPath[MAX_PATH];
         get_ssh_pass_path(passPath, sizeof(passPath));
         HANDLE hf = CreateFile(passPath, GENERIC_READ,
-            FILE_SHARE_READ, NULL, OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL, NULL);
+            FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL, nullptr);
         char password[256] = "";
         if (hf != INVALID_HANDLE_VALUE) {
-            DWORD sz = GetFileSize(hf, NULL);
+            DWORD sz = GetFileSize(hf, nullptr);
             if (sz > 0 && sz < 4096) {
                 BYTE *enc = malloc(sz);
                 DWORD rd;
-                ReadFile(hf, enc, sz, &rd, NULL);
+                ReadFile(hf, enc, sz, &rd, nullptr);
                 DATA_BLOB in  = { sz, enc };
-                DATA_BLOB out = {0};
-                if (CryptUnprotectData(&in, NULL, NULL, NULL, NULL,
+                DATA_BLOB out = {};
+                if (CryptUnprotectData(&in, nullptr, nullptr, nullptr, nullptr,
                                        CRYPTPROTECT_UI_FORBIDDEN, &out)) {
                     strncpy(password, (char *)out.pbData, 255);
                     password[255] = '\0';
@@ -302,8 +302,8 @@ fail:
 
 void ssh_sync_test(HWND hParent)
 {
-    HANDLE h = CreateThread(NULL, 0, ssh_test_thread,
-                             (LPVOID)hParent, 0, NULL);
+    HANDLE h = CreateThread(nullptr, 0, ssh_test_thread,
+                             (LPVOID)hParent, 0, nullptr);
     if (h) CloseHandle(h);
 }
 
@@ -353,15 +353,15 @@ void ssh_sync_save_config(HWND hHostEdit, HWND hPortEdit,
         char passPath[MAX_PATH];
         get_ssh_pass_path(passPath, sizeof(passPath));
         DATA_BLOB in  = { (DWORD)strlen(pass) + 1, (BYTE *)pass };
-        DATA_BLOB out = {0};
-        if (CryptProtectData(&in, L"ksc ssh pass", NULL, NULL, NULL,
+        DATA_BLOB out = {};
+        if (CryptProtectData(&in, L"ksc ssh pass", nullptr, nullptr, nullptr,
                               CRYPTPROTECT_UI_FORBIDDEN, &out)) {
-            HANDLE hf = CreateFile(passPath, GENERIC_WRITE, 0, NULL,
+            HANDLE hf = CreateFile(passPath, GENERIC_WRITE, 0, nullptr,
                                     CREATE_ALWAYS,
-                                    FILE_ATTRIBUTE_NORMAL, NULL);
+                                    FILE_ATTRIBUTE_NORMAL, nullptr);
             if (hf != INVALID_HANDLE_VALUE) {
                 DWORD written;
-                WriteFile(hf, out.pbData, out.cbData, &written, NULL);
+                WriteFile(hf, out.pbData, out.cbData, &written, nullptr);
                 CloseHandle(hf);
             }
             LocalFree(out.pbData);

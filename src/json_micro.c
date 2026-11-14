@@ -1,18 +1,18 @@
 #include "ksc_private.h"
 
-char *json_find_str(const char *json, const char *key)
+[[nodiscard]] char *json_find_str(const char *json, const char *key)
 {
     char search[128];
     sprintf(search, "\"%s\"", key);
     const char *pos = strstr(json, search);
-    if (!pos) return NULL;
+    if (!pos) return nullptr;
     pos = strstr(pos + strlen(search), "\"");
-    if (!pos) return NULL;
+    if (!pos) return nullptr;
     pos++;
     const char *end = strchr(pos, '"');
-    if (!end) return NULL;
+    if (!end) return nullptr;
     int len = (int)(end - pos);
-    if (len <= 0 || len > 1023) return NULL;
+    if (len <= 0 || len > 1023) return nullptr;
     static char buf[1024];
     memcpy(buf, pos, len);
     buf[len] = '\0';
