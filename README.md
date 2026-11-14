@@ -15,7 +15,6 @@
 |---|---|
 | ![Heatmap](screenshots/keyboard-heatmap-dark.png) | ![Keyboard Sim](screenshots/keyboard-sim-dark.png) |
 | ![Mouse Clicker](screenshots/mouse-clicker-dark.png) | ![Stats](screenshots/stats-window-dark.png) |
-| ![Cloud & SSH Backup](screenshots/cloud-ssh-backup-dark.png) | |
 
 ---
 
