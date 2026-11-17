@@ -34,6 +34,8 @@ void tray_show_menu(HWND hWnd, [[maybe_unused]] UINT id)
 {
     HMENU hMenu = CreatePopupMenu();
     AppendMenu(hMenu, MF_STRING, IDM_SHOW, "Show/Hide");
+    AppendMenu(hMenu, MF_STRING | (keyhook_is_paused() ? MF_CHECKED : MF_UNCHECKED),
+               IDM_PAUSE_TRACKING, "Pause Tracking");
     AppendMenu(hMenu, MF_STRING, IDM_HEATMAP, "Key Heatmap");
     AppendMenu(hMenu, MF_STRING, IDM_STATS, "Stats");
     AppendMenu(hMenu, MF_STRING, IDM_MOUSE_CLICKER, "Mouse Clicker");
@@ -58,8 +60,12 @@ void tray_update_tip(HWND hWnd, UINT id)
     int wpm = 0, peak = 0;
     keyhook_get_wpm(&wpm, &peak);
     char tip[128];
-    snprintf(tip, sizeof(tip), "ksc - %lld today (%d WPM)",
-             (long long)today, wpm);
+    if (keyhook_is_paused())
+        snprintf(tip, sizeof(tip), "ksc [PAUSED] - %lld today",
+                 (long long)today);
+    else
+        snprintf(tip, sizeof(tip), "ksc - %lld today (%d WPM)",
+                 (long long)today, wpm);
 
     NOTIFYICONDATA nid = {
         .cbSize = sizeof(NOTIFYICONDATA),

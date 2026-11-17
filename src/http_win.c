@@ -138,6 +138,33 @@ int http_post_json(const char *url, const char *bearer,
                              jsonBody, response, status);
 }
 
+int http_delete(const char *url, const char *bearer, int *status)
+{
+    char *resp = nullptr;
+    int dummy = 0;
+    int ok = http_request_impl(L"DELETE", url, bearer, nullptr, nullptr,
+                               &resp, status ? status : &dummy);
+    free(resp);
+    return ok;
+}
+
+static void append_meta_escaped(char *dst, size_t cap, size_t *pos, const char *s)
+{
+    if (!s || *pos >= cap) return;
+    for (size_t i = 0; s[i]; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (c == '\\' || c == '"') {
+            if (*pos + 2 >= cap) break;
+            dst[(*pos)++] = '\\';
+            dst[(*pos)++] = (char)c;
+        } else if (c >= 0x20) {
+            if (*pos + 1 >= cap) break;
+            dst[(*pos)++] = (char)c;
+        }
+    }
+    dst[*pos < cap ? *pos : cap - 1] = '\0';
+}
+
 int http_upload_file(const char *url, const char *bearer,
                       const char *filePath, const char *remoteName,
                       const char *folderId,
@@ -171,9 +198,18 @@ int http_upload_file(const char *url, const char *bearer,
     CloseHandle(hFile);
 
     char meta[512];
-    snprintf(meta, sizeof(meta),
-        "{\"name\":\"%s\",\"parents\":[\"%s\"]}",
-        remoteName, (folderId && folderId[0]) ? folderId : "root");
+    {
+        size_t mp = 0;
+        const char *fId = (folderId && folderId[0]) ? folderId : "root";
+        const char *p1 = "{\"name\":\"";
+        memcpy(meta + mp, p1, strlen(p1)); mp += strlen(p1);
+        append_meta_escaped(meta, sizeof(meta) - 64, &mp, remoteName);
+        const char *p2 = "\",\"parents\":[\"";
+        memcpy(meta + mp, p2, strlen(p2)); mp += strlen(p2);
+        append_meta_escaped(meta, sizeof(meta) - 8, &mp, fId);
+        const char *p3 = "\"]}";
+        memcpy(meta + mp, p3, strlen(p3) + 1);
+    }
 
     char boundary[64];
     snprintf(boundary, sizeof(boundary), "ksc_boundary_%lu", GetTickCount());

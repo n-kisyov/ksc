@@ -23,18 +23,24 @@ static void ensure_winsock(void)
 static char g_sshHost[256];
 static char g_sshUser[128];
 static int  g_sshPort = 22;
+static SRWLOCK g_sshLock = SRWLOCK_INIT;
 
 bool ssh_sync_is_configured(void)
 {
-    return g_sshHost[0] != '\0';
+    AcquireSRWLockShared(&g_sshLock);
+    bool configured = g_sshHost[0] != '\0';
+    ReleaseSRWLockShared(&g_sshLock);
+    return configured;
 }
 
 void ssh_sync_init(void)
 {
     ensure_winsock();
+    AcquireSRWLockExclusive(&g_sshLock);
     db_get_setting_str("ssh_host", "", g_sshHost, sizeof(g_sshHost));
     db_get_setting_str("ssh_user", "", g_sshUser, sizeof(g_sshUser));
     g_sshPort = db_get_setting_int("ssh_port", 22);
+    ReleaseSRWLockExclusive(&g_sshLock);
 }
 
 static void set_ssh_preferences(LIBSSH2_SESSION *session)
@@ -117,12 +123,20 @@ static int ssh_connect_and_auth(SOCKET *outSock, LIBSSH2_SESSION **outSession,
 
     ensure_winsock();
 
+    char host[256], user[128];
+    int port;
+    AcquireSRWLockShared(&g_sshLock);
+    snprintf(host, sizeof(host), "%s", g_sshHost);
+    snprintf(user, sizeof(user), "%s", g_sshUser);
+    port = g_sshPort;
+    ReleaseSRWLockShared(&g_sshLock);
+
     struct addrinfo hints = {}, *ai = nullptr;
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
     char portStr[16];
-    snprintf(portStr, sizeof(portStr), "%d", g_sshPort);
-    if (getaddrinfo(g_sshHost, portStr, &hints, &ai) != 0) {
+    snprintf(portStr, sizeof(portStr), "%d", port);
+    if (getaddrinfo(host, portStr, &hints, &ai) != 0) {
         err = "Connection failed: host not found";
         goto fail;
     }
@@ -182,7 +196,7 @@ static int ssh_connect_and_auth(SOCKET *outSock, LIBSSH2_SESSION **outSession,
             err = "Connection failed: no password set";
             goto fail;
         }
-        if (libssh2_userauth_password(session, g_sshUser, password) != 0) {
+        if (libssh2_userauth_password(session, user, password) != 0) {
             SecureZeroMemory(password, sizeof(password));
             err = "Connection failed: auth rejected";
             goto fail;
@@ -269,6 +283,90 @@ done:
     return result;
 }
 
+static int desc_ssh_name_cmp(const void *a, const void *b)
+{
+    const char *sa = (const char *)a;
+    const char *sb = (const char *)b;
+    return strcmp(sb, sa);
+}
+
+static void prune_sftp_group(LIBSSH2_SFTP *sftp, char (*names)[128],
+                             int count, int keepCount)
+{
+    if (!names || count <= keepCount) return;
+    qsort(names, (size_t)count, sizeof(names[0]), desc_ssh_name_cmp);
+    for (int i = keepCount; i < count; i++) {
+        char fullPath[256];
+        snprintf(fullPath, sizeof(fullPath), "ksc-backups/%s", names[i]);
+        libssh2_sftp_unlink(sftp, fullPath);
+    }
+}
+
+void ssh_sync_prune(int keepCount)
+{
+    if (keepCount <= 0 || !ssh_sync_is_configured()) return;
+
+    SOCKET sock = INVALID_SOCKET;
+    LIBSSH2_SESSION *session = nullptr;
+    LIBSSH2_SFTP *sftp = nullptr;
+    LIBSSH2_SFTP_HANDLE *dir = nullptr;
+
+    if (!ssh_connect_and_auth(&sock, &session, nullptr))
+        return;
+
+    sftp = libssh2_sftp_init(session);
+    if (!sftp) goto cleanup;
+
+    dir = libssh2_sftp_opendir(sftp, "ksc-backups");
+    if (!dir) goto cleanup;
+
+    char (*mainNames)[128] = nullptr;
+    char (*klogNames)[128] = nullptr;
+    int mainCount = 0, mainCap = 0;
+    int klogCount = 0, klogCap = 0;
+
+    char fname[256];
+    LIBSSH2_SFTP_ATTRIBUTES attrs;
+    while (libssh2_sftp_readdir(dir, fname, sizeof(fname), &attrs) > 0) {
+        if (strncmp(fname, "ksc_backup_", 11) == 0) {
+            if (mainCount >= mainCap) {
+                int nextCap = mainCap ? mainCap * 2 : 32;
+                char (*tmp)[128] = realloc(mainNames, sizeof(*mainNames) * (size_t)nextCap);
+                if (!tmp) break;
+                mainNames = tmp;
+                mainCap = nextCap;
+            }
+            snprintf(mainNames[mainCount], sizeof(mainNames[0]), "%s", fname);
+            mainCount++;
+        } else if (strncmp(fname, "ksc_keylog_backup_", 18) == 0) {
+            if (klogCount >= klogCap) {
+                int nextCap = klogCap ? klogCap * 2 : 32;
+                char (*tmp)[128] = realloc(klogNames, sizeof(*klogNames) * (size_t)nextCap);
+                if (!tmp) break;
+                klogNames = tmp;
+                klogCap = nextCap;
+            }
+            snprintf(klogNames[klogCount], sizeof(klogNames[0]), "%s", fname);
+            klogCount++;
+        }
+    }
+    libssh2_sftp_closedir(dir);
+
+    prune_sftp_group(sftp, mainNames, mainCount, keepCount);
+    prune_sftp_group(sftp, klogNames, klogCount, keepCount);
+
+    free(mainNames);
+    free(klogNames);
+
+cleanup:
+    if (sftp) libssh2_sftp_shutdown(sftp);
+    if (session) {
+        libssh2_session_disconnect(session, "bye");
+        libssh2_session_free(session);
+    }
+    if (sock != INVALID_SOCKET) closesocket(sock);
+}
+
 static DWORD WINAPI ssh_test_thread(LPVOID param)
 {
     HWND hParent = (HWND)param;
@@ -283,7 +381,8 @@ static DWORD WINAPI ssh_test_thread(LPVOID param)
     }
     if (sock != INVALID_SOCKET) closesocket(sock);
 
-    MessageBox(hParent, msg, "SSH Test",
+    HWND owner = (hParent && IsWindow(hParent)) ? hParent : nullptr;
+    MessageBox(owner, msg, "SSH Test",
                MB_OK | (ok ? MB_ICONINFORMATION : MB_ICONERROR));
     return 0;
 }
@@ -298,34 +397,46 @@ void ssh_sync_test(HWND hParent)
 void ssh_sync_load_config(HWND hHostEdit, HWND hPortEdit,
                            HWND hUserEdit, [[maybe_unused]] HWND hPassEdit)
 {
+    char host[256], user[128];
+    int port;
+    AcquireSRWLockExclusive(&g_sshLock);
     if (!g_sshHost[0])
         db_get_setting_str("ssh_host", "", g_sshHost, sizeof(g_sshHost));
     if (!g_sshUser[0])
         db_get_setting_str("ssh_user", "", g_sshUser, sizeof(g_sshUser));
     if (g_sshPort == 0)
         g_sshPort = db_get_setting_int("ssh_port", 22);
+    snprintf(host, sizeof(host), "%s", g_sshHost);
+    snprintf(user, sizeof(user), "%s", g_sshUser);
+    port = g_sshPort;
+    ReleaseSRWLockExclusive(&g_sshLock);
 
-    SetWindowText(hHostEdit, g_sshHost);
-    SetWindowText(hUserEdit, g_sshUser);
+    SetWindowText(hHostEdit, host);
+    SetWindowText(hUserEdit, user);
     char portStr[16];
-    snprintf(portStr, sizeof(portStr), "%d", g_sshPort);
+    snprintf(portStr, sizeof(portStr), "%d", port);
     SetWindowText(hPortEdit, portStr);
 }
 
 void ssh_sync_save_config(HWND hHostEdit, HWND hPortEdit,
                            HWND hUserEdit, HWND hPassEdit)
 {
-    GetWindowText(hHostEdit, g_sshHost, sizeof(g_sshHost));
-    GetWindowText(hUserEdit, g_sshUser, sizeof(g_sshUser));
-
-    char portStr[32];
+    char host[256], user[128], portStr[32];
+    GetWindowText(hHostEdit, host, sizeof(host));
+    GetWindowText(hUserEdit, user, sizeof(user));
     GetWindowText(hPortEdit, portStr, sizeof(portStr));
-    g_sshPort = atoi(portStr);
-    if (g_sshPort <= 0 || g_sshPort > 65535) g_sshPort = 22;
+    int port = atoi(portStr);
+    if (port <= 0 || port > 65535) port = 22;
 
-    db_set_setting_str("ssh_host", g_sshHost);
-    db_set_setting_str("ssh_user", g_sshUser);
-    db_set_setting_int("ssh_port", g_sshPort);
+    AcquireSRWLockExclusive(&g_sshLock);
+    snprintf(g_sshHost, sizeof(g_sshHost), "%s", host);
+    snprintf(g_sshUser, sizeof(g_sshUser), "%s", user);
+    g_sshPort = port;
+    ReleaseSRWLockExclusive(&g_sshLock);
+
+    db_set_setting_str("ssh_host", host);
+    db_set_setting_str("ssh_user", user);
+    db_set_setting_int("ssh_port", port);
 
     /* save password with DPAPI */
     char pass[256];

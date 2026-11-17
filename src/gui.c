@@ -20,7 +20,7 @@ static HICON g_hAppIcon = nullptr;
 static HWND g_hClickerWnd = nullptr;
 static HWND g_hTotalLabel = nullptr;
 
-static void format_shortcut(int packed, char *buf, [[maybe_unused]] int bufsize);
+static void format_shortcut(int packed, char *buf, int bufsize);
 static void show_stats_window(HWND hParent);
 
 typedef void (WINAPI *fnSetPreferredAppMode)(int mode);
@@ -63,6 +63,28 @@ static int CALLBACK listview_compare_proc(LPARAM lParam1, LPARAM lParam2,
     return ctx->asc ? cmp : -cmp;
 }
 
+static void listview_update_header_arrows(HWND hLv, const ListViewSortState *st)
+{
+    if (!hLv) return;
+    HWND hHdr = ListView_GetHeader(hLv);
+    if (!hHdr) return;
+    int colCount = Header_GetItemCount(hHdr);
+    for (int c = 0; c < colCount; c++) {
+        HDITEM hdi = { .mask = HDI_FORMAT };
+        if (!Header_GetItem(hHdr, c, &hdi)) continue;
+        hdi.fmt &= ~(HDF_SORTUP | HDF_SORTDOWN);
+        if (st && st->userSorted && c == st->sortCol) {
+            hdi.fmt |= st->sortAsc ? HDF_SORTUP : HDF_SORTDOWN;
+        }
+        Header_SetItem(hHdr, c, &hdi);
+    }
+}
+
+static void listview_clear_sort_arrows(HWND hLv)
+{
+    listview_update_header_arrows(hLv, nullptr);
+}
+
 static void listview_apply_sort(HWND hLv, const ListViewSortState *st,
                                 bool isNumericCol)
 {
@@ -74,6 +96,7 @@ static void listview_apply_sort(HWND hLv, const ListViewSortState *st,
         .numeric = isNumericCol
     };
     ListView_SortItemsEx(hLv, listview_compare_proc, (LPARAM)&ctx);
+    listview_update_header_arrows(hLv, st);
 }
 
 static void listview_toggle_sort(HWND hLv, ListViewSortState *st,
@@ -88,6 +111,85 @@ static void listview_toggle_sort(HWND hLv, ListViewSortState *st,
         st->userSorted = true;
     }
     listview_apply_sort(hLv, st, isNumericCol);
+}
+
+typedef struct {
+    int topIdx;
+    char selectedText[260];
+    bool hasSelection;
+} LvViewState;
+
+static void listview_save_view_state(HWND hLv, LvViewState *vs)
+{
+    vs->topIdx = ListView_GetTopIndex(hLv);
+    vs->selectedText[0] = '\0';
+    vs->hasSelection = false;
+    int sel = ListView_GetNextItem(hLv, -1, LVNI_SELECTED);
+    if (sel >= 0) {
+        ListView_GetItemText(hLv, sel, 0, vs->selectedText,
+                             sizeof(vs->selectedText));
+        vs->hasSelection = (vs->selectedText[0] != '\0');
+    }
+}
+
+static void listview_restore_view_state(HWND hLv, const LvViewState *vs)
+{
+    int n = ListView_GetItemCount(hLv);
+    if (n <= 0) return;
+    if (vs->hasSelection) {
+        for (int i = 0; i < n; i++) {
+            char buf[260] = "";
+            ListView_GetItemText(hLv, i, 0, buf, sizeof(buf));
+            if (_stricmp(buf, vs->selectedText) == 0) {
+                ListView_SetItemState(hLv, i, LVIS_SELECTED | LVIS_FOCUSED,
+                                      LVIS_SELECTED | LVIS_FOCUSED);
+                break;
+            }
+        }
+    }
+    if (vs->topIdx > 0 && vs->topIdx < n) {
+        RECT rcItem = {};
+        if (ListView_GetItemRect(hLv, 0, &rcItem, LVIR_BOUNDS)) {
+            int itemH = rcItem.bottom - rcItem.top;
+            if (itemH > 0) {
+                ListView_Scroll(hLv, 0, vs->topIdx * itemH);
+            }
+        }
+    }
+}
+
+static void refresh_app_combo_preserve_sel(HWND hCombo, bool isKeylog)
+{
+    if (!hCombo) return;
+    char prevSel[256] = "";
+    int cur = (int)SendMessage(hCombo, CB_GETCURSEL, 0, 0);
+    if (cur > 0) {
+        LRESULT len = SendMessage(hCombo, CB_GETLBTEXTLEN, cur, 0);
+        if (len >= 0 && (size_t)len < sizeof(prevSel)) {
+            SendMessage(hCombo, CB_GETLBTEXT, cur, (LPARAM)prevSel);
+        }
+    }
+
+    SendMessage(hCombo, CB_RESETCONTENT, 0, 0);
+    SendMessage(hCombo, CB_ADDSTRING, 0, (LPARAM)"All apps");
+    char **apps = nullptr;
+    int nApps = 0;
+    int ok = isKeylog ? keylog_get_apps(&apps, &nApps)
+                      : db_get_distinct_apps(&apps, &nApps);
+    if (ok) {
+        for (int i = 0; i < nApps; i++)
+            SendMessage(hCombo, CB_ADDSTRING, 0, (LPARAM)apps[i]);
+        if (isKeylog) keylog_free_apps(apps, nApps);
+        else db_free_apps(apps, nApps);
+    }
+
+    int restoreIdx = 0;
+    if (prevSel[0]) {
+        LRESULT idx = SendMessage(hCombo, CB_FINDSTRINGEXACT, (WPARAM)-1,
+                                  (LPARAM)prevSel);
+        if (idx != CB_ERR) restoreIdx = (int)idx;
+    }
+    SendMessage(hCombo, CB_SETCURSEL, restoreIdx, 0);
 }
 
 static bool focus_existing_window(const char *className)
@@ -291,29 +393,43 @@ static int is_mouse_vk(int vk)
 }
 
 static ListViewSortState g_mainSort = {1, false, false};
+static int64_t g_cachedKbTotal = 0;
+static int64_t g_cachedMouseTotal = 0;
+
+static void update_main_status_bar(void)
+{
+    if (!g_hTotalLabel) return;
+    int64_t todayTotal = db_get_today_count();
+    int wpm = 0, peakWpm = 0;
+    keyhook_get_wpm(&wpm, &peakWpm);
+    const char *prefix = keyhook_is_paused() ? "[PAUSED]  " : "";
+    char buf[224];
+    snprintf(buf, sizeof(buf),
+        "%sTotal: %lld keys | %lld clicks  |  Today: %lld  |  Speed: %d WPM (Peak: %d)",
+        prefix,
+        (long long)g_cachedKbTotal, (long long)g_cachedMouseTotal,
+        (long long)todayTotal, wpm, peakWpm);
+    SetWindowText(g_hTotalLabel, buf);
+}
 
 static void refresh_list_view(void)
 {
     if (!g_hListView) return;
 
+    LvViewState vs;
+    listview_save_view_state(g_hListView, &vs);
+
     SendMessage(g_hListView, WM_SETREDRAW, FALSE, 0);
     ListView_DeleteAllItems(g_hListView);
-
-    int64_t todayTotal = db_get_today_count();
-    int wpm = 0, peakWpm = 0;
-    keyhook_get_wpm(&wpm, &peakWpm);
 
     KeyStat *stats = nullptr;
     int count = db_get_stats(&stats);
     if (!stats || count == 0) {
-        if (g_hTotalLabel) {
-            char buf[192];
-            snprintf(buf, sizeof(buf),
-                "Total: 0 keys | 0 clicks  |  Today: %lld  |  Speed: %d WPM (Peak: %d)",
-                (long long)todayTotal, wpm, peakWpm);
-            SetWindowText(g_hTotalLabel, buf);
-        }
+        g_cachedKbTotal = 0;
+        g_cachedMouseTotal = 0;
+        update_main_status_bar();
         SendMessage(g_hListView, WM_SETREDRAW, TRUE, 0);
+        InvalidateRect(g_hListView, nullptr, TRUE);
         return;
     }
 
@@ -324,15 +440,9 @@ static void refresh_list_view(void)
         else
             kbTotal += stats[i].count;
     }
-
-    if (g_hTotalLabel) {
-        char buf[192];
-        snprintf(buf, sizeof(buf),
-            "Total: %lld keys | %lld clicks  |  Today: %lld  |  Speed: %d WPM (Peak: %d)",
-            (long long)kbTotal, (long long)mouseTotal,
-            (long long)todayTotal, wpm, peakWpm);
-        SetWindowText(g_hTotalLabel, buf);
-    }
+    g_cachedKbTotal = kbTotal;
+    g_cachedMouseTotal = mouseTotal;
+    update_main_status_bar();
 
     LVITEM lvi;
     memset(&lvi, 0, sizeof(lvi));
@@ -351,6 +461,7 @@ static void refresh_list_view(void)
 
     db_free_stats(stats);
     listview_apply_sort(g_hListView, &g_mainSort, g_mainSort.sortCol == 1);
+    listview_restore_view_state(g_hListView, &vs);
     SendMessage(g_hListView, WM_SETREDRAW, TRUE, 0);
     InvalidateRect(g_hListView, nullptr, TRUE);
 }
@@ -701,7 +812,15 @@ static LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg,
             if (GetAsyncKeyState(VK_MENU)    & 0x8000) mod |= MOD_ALT;
             if ((GetAsyncKeyState(VK_LWIN) | GetAsyncKeyState(VK_RWIN))
                 & 0x8000) mod |= MOD_WIN;
-            if (mod == 0) { g_setCapturing = 0; return 0; }
+            if (mod == 0 || vk == VK_ESCAPE) {
+                char buf[64];
+                int cur = db_get_setting_int("show_ksc_shortcut",
+                    (MOD_CONTROL | MOD_SHIFT) << 16 | 'K');
+                format_shortcut(cur, buf, sizeof(buf));
+                SetDlgItemText(hWnd, IDC_HOTKEY_SHOW_LBL, buf);
+                g_setCapturing = 0;
+                return 0;
+            }
             int packed = (mod << 16) | vk;
             db_set_setting_int("show_ksc_shortcut", packed);
             {
@@ -1102,7 +1221,10 @@ static void heatmap_load_counts(HWND hWnd, HeatmapData *hd)
     if (hAppCombo) {
         int sel = (int)SendMessage(hAppCombo, CB_GETCURSEL, 0, 0);
         if (sel > 0) {
-            SendMessage(hAppCombo, CB_GETLBTEXT, sel, (LPARAM)appFilter);
+            LRESULT len = SendMessage(hAppCombo, CB_GETLBTEXTLEN, sel, 0);
+            if (len >= 0 && (size_t)len < sizeof(appFilter)) {
+                SendMessage(hAppCombo, CB_GETLBTEXT, sel, (LPARAM)appFilter);
+            }
         }
     }
 
@@ -1296,21 +1418,7 @@ static LRESULT CALLBACK HeatmapWndProc(HWND hWnd, UINT msg,
                         10, 348, 200, 200,
                         hWnd, (HMENU)IDC_HEATMAP_APP_COMBO,
                         g_hInst, nullptr);
-        SendMessage(hCombo, CB_ADDSTRING, 0,
-                    (LPARAM)"All apps");
-        {
-            char **apps = nullptr;
-            int nApps = 0;
-            extern int db_get_distinct_apps(char ***o, int *c);
-            if (db_get_distinct_apps(&apps, &nApps)) {
-                for (int i = 0; i < nApps; i++)
-                    SendMessage(hCombo, CB_ADDSTRING, 0,
-                                (LPARAM)apps[i]);
-                extern void db_free_apps(char **a, int c);
-                db_free_apps(apps, nApps);
-            }
-        }
-        SendMessage(hCombo, CB_SETCURSEL, 0, 0);
+        refresh_app_combo_preserve_sel(hCombo, false);
 
         HWND hPeriod = CreateWindow(WC_COMBOBOX, "",
                         WS_CHILD | WS_VISIBLE |
@@ -1331,6 +1439,7 @@ static LRESULT CALLBACK HeatmapWndProc(HWND hWnd, UINT msg,
     case WM_TIMER:
         if (wParam == ID_TIMER_REFRESH) {
             HeatmapData *hd = (HeatmapData *)GetWindowLongPtr(hWnd, GWLP_USERDATA);
+            refresh_app_combo_preserve_sel(GetDlgItem(hWnd, IDC_HEATMAP_APP_COMBO), false);
             heatmap_load_counts(hWnd, hd);
             InvalidateRect(hWnd, nullptr, FALSE);
         }
@@ -1458,85 +1567,11 @@ typedef struct {
     HWND hDateFrom;
     HWND hDateTo;
     HWND hAppCombo;
+    HWND hViewCombo;
     HWND hTotal;
+    int viewMode;
     ListViewSortState sort;
 } StatsWinData;
-
-static void stats_refresh_range(HWND hListView, HWND hTotal,
-                                 SYSTEMTIME *stFrom, SYSTEMTIME *stTo,
-                                 const char *app,
-                                 const ListViewSortState *sortState)
-{
-    if (!hListView || !stFrom || !stTo) return;
-
-    SendMessage(hListView, WM_SETREDRAW, FALSE, 0);
-    ListView_DeleteAllItems(hListView);
-
-    char from[16], to[16];
-    format_date_str(stFrom, from, sizeof(from));
-    format_date_str(stTo, to, sizeof(to));
-
-    KeyStat *stats = nullptr;
-    int count = db_get_date_range_stats(from, to, app, 0, &stats);
-
-    int64_t kbTotal = 0, mouseTotal = 0;
-    if (stats && count > 0) {
-        for (int i = 0; i < count; i++) {
-            if (is_mouse_vk(stats[i].key_code))
-                mouseTotal += stats[i].count;
-            else
-                kbTotal += stats[i].count;
-        }
-    }
-    if (hTotal) {
-        char buf[128];
-        sprintf(buf, "Keys: %lld | Mouse: %lld",
-                (long long)kbTotal, (long long)mouseTotal);
-        SetWindowText(hTotal, buf);
-    }
-
-    if (!stats || count == 0) {
-        SendMessage(hListView, WM_SETREDRAW, TRUE, 0);
-        InvalidateRect(hListView, nullptr, TRUE);
-        return;
-    }
-
-    LVITEM lvi;
-    memset(&lvi, 0, sizeof(lvi));
-    lvi.mask = LVIF_TEXT;
-
-    for (int i = 0; i < count; i++) {
-        lvi.iItem = i;
-        lvi.iSubItem = 0;
-        lvi.pszText = stats[i].key_name;
-        ListView_InsertItem(hListView, &lvi);
-
-        char cnt[32];
-        sprintf(cnt, "%lld", (long long)stats[i].count);
-        ListView_SetItemText(hListView, i, 1, cnt);
-    }
-
-    db_free_stats(stats);
-    if (sortState)
-        listview_apply_sort(hListView, sortState, sortState->sortCol == 1);
-    SendMessage(hListView, WM_SETREDRAW, TRUE, 0);
-    InvalidateRect(hListView, nullptr, TRUE);
-}
-
-static void populate_app_combo(HWND hCombo)
-{
-    SendMessage(hCombo, CB_RESETCONTENT, 0, 0);
-    SendMessage(hCombo, CB_ADDSTRING, 0, (LPARAM)"All apps");
-    char **apps = nullptr;
-    int nApps = 0;
-    if (db_get_distinct_apps(&apps, &nApps)) {
-        for (int i = 0; i < nApps; i++) {
-            SendMessage(hCombo, CB_ADDSTRING, 0, (LPARAM)apps[i]);
-        }
-        db_free_apps(apps, nApps);
-    }
-    SendMessage(hCombo, CB_SETCURSEL, 0, 0);
-}
 
 static const char *get_selected_app(HWND hCombo)
 {
@@ -1544,12 +1579,150 @@ static const char *get_selected_app(HWND hCombo)
     if (sel <= 0) return nullptr;
     static char buf[256];
     buf[0] = '\0';
-    SendMessage(hCombo, CB_GETLBTEXT, sel, (LPARAM)buf);
+    LRESULT len = SendMessage(hCombo, CB_GETLBTEXTLEN, sel, 0);
+    if (len >= 0 && (size_t)len < sizeof(buf)) {
+        SendMessage(hCombo, CB_GETLBTEXT, sel, (LPARAM)buf);
+    }
     return buf[0] ? buf : nullptr;
+}
+
+static void stats_setup_columns(StatsWinData *d)
+{
+    if (!d || !d->hListView) return;
+    HWND hLv = d->hListView;
+    SendMessage(hLv, WM_SETREDRAW, FALSE, 0);
+    ListView_DeleteAllItems(hLv);
+    while (ListView_DeleteColumn(hLv, 0)) {}
+    d->sort.userSorted = false;
+    listview_clear_sort_arrows(hLv);
+
+    LVCOLUMN lvc = { .mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM };
+    if (d->viewMode == 0) {
+        lvc.cx = 280; lvc.pszText = "Key";   lvc.iSubItem = 0;
+        ListView_InsertColumn(hLv, 0, &lvc);
+        lvc.cx = 120; lvc.pszText = "Count"; lvc.iSubItem = 1;
+        ListView_InsertColumn(hLv, 1, &lvc);
+    } else {
+        lvc.cx = (d->viewMode == 1) ? 300 : 160;
+        lvc.pszText = (d->viewMode == 1) ? "Application" : "Date";
+        lvc.iSubItem = 0;
+        ListView_InsertColumn(hLv, 0, &lvc);
+        lvc.cx = 110; lvc.pszText = "Keys";  lvc.iSubItem = 1;
+        ListView_InsertColumn(hLv, 1, &lvc);
+        lvc.cx = 110; lvc.pszText = "Mouse"; lvc.iSubItem = 2;
+        ListView_InsertColumn(hLv, 2, &lvc);
+        lvc.cx = 120; lvc.pszText = "Total"; lvc.iSubItem = 3;
+        ListView_InsertColumn(hLv, 3, &lvc);
+    }
+    if (d->hAppCombo) {
+        EnableWindow(d->hAppCombo, d->viewMode != 1 ? TRUE : FALSE);
+    }
+    SendMessage(hLv, WM_SETREDRAW, TRUE, 0);
+}
+
+static void stats_refresh_range(StatsWinData *d,
+                                 SYSTEMTIME *stFrom, SYSTEMTIME *stTo,
+                                 const char *app)
+{
+    if (!d || !d->hListView || !stFrom || !stTo) return;
+    HWND hLv = d->hListView;
+
+    LvViewState vs;
+    listview_save_view_state(hLv, &vs);
+
+    SendMessage(hLv, WM_SETREDRAW, FALSE, 0);
+    ListView_DeleteAllItems(hLv);
+
+    char from[16], to[16];
+    format_date_str(stFrom, from, sizeof(from));
+    format_date_str(stTo, to, sizeof(to));
+
+    int64_t kbTotal = 0, mouseTotal = 0;
+    int inserted = 0;
+
+    LVITEM lvi = { .mask = LVIF_TEXT };
+    if (d->viewMode == 0) {
+        KeyStat *stats = nullptr;
+        int count = db_get_date_range_stats(from, to, app, 0, &stats);
+        if (stats && count > 0) {
+            for (int i = 0; i < count; i++) {
+                if (is_mouse_vk(stats[i].key_code))
+                    mouseTotal += stats[i].count;
+                else
+                    kbTotal += stats[i].count;
+
+                lvi.iItem = i;
+                lvi.iSubItem = 0;
+                lvi.pszText = stats[i].key_name;
+                ListView_InsertItem(hLv, &lvi);
+
+                char cnt[32];
+                sprintf(cnt, "%lld", (long long)stats[i].count);
+                ListView_SetItemText(hLv, i, 1, cnt);
+            }
+            inserted = count;
+        }
+        db_free_stats(stats);
+    } else {
+        SummaryStat *rows = nullptr;
+        int count = (d->viewMode == 1)
+            ? db_get_app_stats(from, to, &rows)
+            : db_get_daily_stats(from, to, app, &rows);
+        if (rows && count > 0) {
+            for (int i = 0; i < count; i++) {
+                kbTotal += rows[i].kb_count;
+                mouseTotal += rows[i].mouse_count;
+
+                lvi.iItem = i;
+                lvi.iSubItem = 0;
+                lvi.pszText = rows[i].label;
+                ListView_InsertItem(hLv, &lvi);
+
+                char b1[32], b2[32], b3[32];
+                sprintf(b1, "%lld", (long long)rows[i].kb_count);
+                sprintf(b2, "%lld", (long long)rows[i].mouse_count);
+                sprintf(b3, "%lld", (long long)rows[i].total_count);
+                ListView_SetItemText(hLv, i, 1, b1);
+                ListView_SetItemText(hLv, i, 2, b2);
+                ListView_SetItemText(hLv, i, 3, b3);
+            }
+            inserted = count;
+        }
+        db_free_summary_stats(rows);
+    }
+
+    if (d->hTotal) {
+        char buf[128];
+        sprintf(buf, "Keys: %lld | Mouse: %lld",
+                (long long)kbTotal, (long long)mouseTotal);
+        SetWindowText(d->hTotal, buf);
+    }
+
+    if (inserted > 0) {
+        listview_apply_sort(hLv, &d->sort, d->sort.sortCol >= 1);
+        listview_restore_view_state(hLv, &vs);
+    }
+    SendMessage(hLv, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(hLv, nullptr, TRUE);
+}
+
+static void stats_refresh_from_ui(StatsWinData *d)
+{
+    if (!d) return;
+    SYSTEMTIME stFrom, stTo;
+    LRESULT rFrom = SendMessage(d->hDateFrom, DTM_GETSYSTEMTIME, 0, (LPARAM)&stFrom);
+    LRESULT rTo = SendMessage(d->hDateTo, DTM_GETSYSTEMTIME, 0, (LPARAM)&stTo);
+    if (rFrom == GDT_VALID && rTo == GDT_VALID) {
+        const char *app = (d->viewMode == 1) ? nullptr : get_selected_app(d->hAppCombo);
+        stats_refresh_range(d, &stFrom, &stTo, app);
+    }
 }
 
 static void export_csv_file(HWND hParent, KeyStat *stats, int count,
                              const char *defaultName);
+static void export_summary_csv_file(HWND hParent, const SummaryStat *rows,
+                                     int count, const char *firstColName,
+                                     const char *defaultName);
 
 static LRESULT CALLBACK StatsWndProc(HWND hWnd, UINT msg,
                                       WPARAM wParam, LPARAM lParam)
@@ -1565,48 +1738,62 @@ static LRESULT CALLBACK StatsWndProc(HWND hWnd, UINT msg,
 
         CreateWindow(WC_STATIC, "From:",
                      WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
-                     10, yTop, 38, dph, hWnd, nullptr, g_hInst, nullptr);
+                     10, yTop, 36, dph, hWnd, nullptr, g_hInst, nullptr);
 
         HWND hFrom = CreateWindow(DATETIMEPICK_CLASS, "",
                        WS_CHILD | WS_VISIBLE | DTS_SHORTDATECENTURYFORMAT,
-                       50, yTop, 110, dph,
+                       48, yTop, 105, dph,
                        hWnd, (HMENU)IDC_DATE_FROM, g_hInst, nullptr);
         data->hDateFrom = hFrom;
 
         CreateWindow(WC_STATIC, "To:",
                      WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
-                     170, yTop, 22, dph, hWnd, nullptr, g_hInst, nullptr);
+                     160, yTop, 22, dph, hWnd, nullptr, g_hInst, nullptr);
 
         HWND hTo = CreateWindow(DATETIMEPICK_CLASS, "",
                      WS_CHILD | WS_VISIBLE | DTS_SHORTDATECENTURYFORMAT,
-                     196, yTop, 110, dph,
+                     184, yTop, 105, dph,
                      hWnd, (HMENU)IDC_DATE_TO, g_hInst, nullptr);
         data->hDateTo = hTo;
 
         CreateWindow(WC_STATIC, "App:",
                      WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
-                     316, yTop, 30, dph, hWnd, nullptr, g_hInst, nullptr);
+                     296, yTop, 28, dph, hWnd, nullptr, g_hInst, nullptr);
 
         HWND hApp = CreateWindow(WC_COMBOBOX, "",
                      WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-                     350, yTop, 120, 200,
+                     326, yTop, 120, 200,
                      hWnd, (HMENU)IDC_APP_COMBO, g_hInst, nullptr);
         data->hAppCombo = hApp;
-        populate_app_combo(hApp);
+        refresh_app_combo_preserve_sel(hApp, false);
+
+        CreateWindow(WC_STATIC, "View:",
+                     WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
+                     454, yTop, 34, dph, hWnd, nullptr, g_hInst, nullptr);
+
+        HWND hView = CreateWindow(WC_COMBOBOX, "",
+                     WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+                     490, yTop, 115, 200,
+                     hWnd, (HMENU)IDC_STATS_VIEW_COMBO, g_hInst, nullptr);
+        SendMessage(hView, CB_ADDSTRING, 0, (LPARAM)"By Key");
+        SendMessage(hView, CB_ADDSTRING, 0, (LPARAM)"By Application");
+        SendMessage(hView, CB_ADDSTRING, 0, (LPARAM)"By Day");
+        SendMessage(hView, CB_SETCURSEL, 0, 0);
+        data->hViewCombo = hView;
 
         CreateWindow(WC_BUTTON, "Refresh",
                      WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                     480, yTop - 1, 60, dph + 2,
+                     612, yTop - 1, 64, dph + 2,
                      hWnd, (HMENU)IDC_STATS_REFRESH_BTN, g_hInst, nullptr);
 
         CreateWindow(WC_BUTTON, "Export CSV",
                      WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                     546, yTop - 1, 72, dph + 2,
+                     682, yTop - 1, 76, dph + 2,
                      hWnd, (HMENU)IDC_EXPORT_BTN, g_hInst, nullptr);
 
         data->hTotal = CreateWindow(WC_STATIC, "Keys: 0 | Mouse: 0",
                          WS_CHILD | WS_VISIBLE | SS_LEFT,
-                         10, 40, 400, 20,
+                         10, 40, 500, 20,
                          hWnd, nullptr, g_hInst, nullptr);
 
         SYSTEMTIME stEnd, stMonthAgo;
@@ -1620,35 +1807,24 @@ static LRESULT CALLBACK StatsWndProc(HWND hWnd, UINT msg,
 
         HWND hLv = CreateWindow(WC_LISTVIEW, "",
                     WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL,
-                    0, 62, 10, 10,
+                    0, 64, 10, 10,
                     hWnd, (HMENU)IDC_LISTVIEW, g_hInst, nullptr);
 
         ListView_SetExtendedListViewStyle(hLv,
             LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER);
 
-        LVCOLUMN lvc;
-        memset(&lvc, 0, sizeof(lvc));
-        lvc.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
-        lvc.cx = 280;
-        lvc.pszText = "Key";
-        lvc.iSubItem = 0;
-        ListView_InsertColumn(hLv, 0, &lvc);
-        lvc.cx = 100;
-        lvc.pszText = "Count";
-        lvc.iSubItem = 1;
-        ListView_InsertColumn(hLv, 1, &lvc);
-
         data->hListView = hLv;
         SetWindowLongPtr(hWnd, GWLP_USERDATA, (LONG_PTR)data);
 
+        stats_setup_columns(data);
+
         RECT rc;
         GetClientRect(hWnd, &rc);
-        SetWindowPos(hLv, nullptr, 0, 62, rc.right, rc.bottom - 62,
+        SetWindowPos(hLv, nullptr, 0, 64, rc.right, rc.bottom - 64,
                      SWP_NOZORDER);
 
         apply_listview_theme(hWnd, hLv);
-        stats_refresh_range(hLv, data->hTotal, &stMonthAgo, &stEnd, nullptr,
-                            &data->sort);
+        stats_refresh_range(data, &stMonthAgo, &stEnd, nullptr);
         SetTimer(hWnd, ID_TIMER_REFRESH, 10000, nullptr);
         return 0;
     }
@@ -1659,8 +1835,8 @@ static LRESULT CALLBACK StatsWndProc(HWND hWnd, UINT msg,
         if (d && d->hListView) {
             RECT rc;
             GetClientRect(hWnd, &rc);
-            SetWindowPos(d->hListView, nullptr, 0, 62,
-                         rc.right, rc.bottom - 62, SWP_NOZORDER);
+            SetWindowPos(d->hListView, nullptr, 0, 64,
+                         rc.right, rc.bottom - 64, SWP_NOZORDER);
         }
         return 0;
     }
@@ -1685,7 +1861,7 @@ static LRESULT CALLBACK StatsWndProc(HWND hWnd, UINT msg,
             StatsWinData *d = (StatsWinData *)GetWindowLongPtr(hWnd, GWLP_USERDATA);
             if (d) {
                 listview_toggle_sort(d->hListView, &d->sort, pnm->iSubItem,
-                                     pnm->iSubItem == 1);
+                                     pnm->iSubItem >= 1);
             }
             return 0;
         }
@@ -1698,31 +1874,24 @@ static LRESULT CALLBACK StatsWndProc(HWND hWnd, UINT msg,
             StatsWinData *d = (StatsWinData *)GetWindowLongPtr(
                 hWnd, GWLP_USERDATA);
             if (d) {
-                SYSTEMTIME stFrom, stTo;
-                LRESULT rFrom = SendMessage(d->hDateFrom,
-                    DTM_GETSYSTEMTIME, 0, (LPARAM)&stFrom);
-                LRESULT rTo = SendMessage(d->hDateTo,
-                    DTM_GETSYSTEMTIME, 0, (LPARAM)&stTo);
-                if (rFrom == GDT_VALID && rTo == GDT_VALID) {
-                    const char *app = get_selected_app(d->hAppCombo);
-                    stats_refresh_range(d->hListView, d->hTotal, &stFrom, &stTo,
-                                        app, &d->sort);
-                }
+                refresh_app_combo_preserve_sel(d->hAppCombo, false);
+                stats_refresh_from_ui(d);
             }
         } else if (LOWORD(wParam) == IDC_APP_COMBO &&
                    HIWORD(wParam) == CBN_SELCHANGE) {
             StatsWinData *d = (StatsWinData *)GetWindowLongPtr(
                 hWnd, GWLP_USERDATA);
+            stats_refresh_from_ui(d);
+        } else if (LOWORD(wParam) == IDC_STATS_VIEW_COMBO &&
+                   HIWORD(wParam) == CBN_SELCHANGE) {
+            StatsWinData *d = (StatsWinData *)GetWindowLongPtr(
+                hWnd, GWLP_USERDATA);
             if (d) {
-                SYSTEMTIME stFrom, stTo;
-                LRESULT rFrom = SendMessage(d->hDateFrom,
-                    DTM_GETSYSTEMTIME, 0, (LPARAM)&stFrom);
-                LRESULT rTo = SendMessage(d->hDateTo,
-                    DTM_GETSYSTEMTIME, 0, (LPARAM)&stTo);
-                if (rFrom == GDT_VALID && rTo == GDT_VALID) {
-                    const char *app = get_selected_app(d->hAppCombo);
-                    stats_refresh_range(d->hListView, d->hTotal, &stFrom, &stTo,
-                                        app, &d->sort);
+                int sel = (int)SendMessage(d->hViewCombo, CB_GETCURSEL, 0, 0);
+                if (sel >= 0 && sel <= 2 && sel != d->viewMode) {
+                    d->viewMode = sel;
+                    stats_setup_columns(d);
+                    stats_refresh_from_ui(d);
                 }
             }
         } else if (LOWORD(wParam) == IDC_EXPORT_BTN &&
@@ -1739,16 +1908,33 @@ static LRESULT CALLBACK StatsWndProc(HWND hWnd, UINT msg,
                     char from[16], to[16];
                     format_date_str(&stFrom, from, sizeof(from));
                     format_date_str(&stTo, to, sizeof(to));
-                    const char *app = get_selected_app(d->hAppCombo);
-                    KeyStat *stats = nullptr;
-                    int cnt = db_get_date_range_stats(from, to, app, 1, &stats);
-                    if (stats && cnt > 0) {
-                        export_csv_file(hWnd, stats, cnt,
-                                        "ksc_stats_period.csv");
-                        db_free_stats(stats);
+                    const char *app = (d->viewMode == 1) ? nullptr : get_selected_app(d->hAppCombo);
+                    if (d->viewMode == 0) {
+                        KeyStat *stats = nullptr;
+                        int cnt = db_get_date_range_stats(from, to, app, 1, &stats);
+                        if (stats && cnt > 0) {
+                            export_csv_file(hWnd, stats, cnt,
+                                            "ksc_stats_period.csv");
+                            db_free_stats(stats);
+                        } else {
+                            MessageBox(hWnd, "No data in selected range.",
+                                       "Export", MB_OK | MB_ICONINFORMATION);
+                        }
                     } else {
-                        MessageBox(hWnd, "No data in selected range.",
-                                   "Export", MB_OK | MB_ICONINFORMATION);
+                        SummaryStat *rows = nullptr;
+                        int cnt = (d->viewMode == 1)
+                            ? db_get_app_stats(from, to, &rows)
+                            : db_get_daily_stats(from, to, app, &rows);
+                        if (rows && cnt > 0) {
+                            export_summary_csv_file(hWnd, rows, cnt,
+                                d->viewMode == 1 ? "Application" : "Date",
+                                d->viewMode == 1 ? "ksc_stats_apps.csv"
+                                                 : "ksc_stats_daily.csv");
+                            db_free_summary_stats(rows);
+                        } else {
+                            MessageBox(hWnd, "No data in selected range.",
+                                       "Export", MB_OK | MB_ICONINFORMATION);
+                        }
                     }
                 }
             }
@@ -1760,16 +1946,8 @@ static LRESULT CALLBACK StatsWndProc(HWND hWnd, UINT msg,
             StatsWinData *d = (StatsWinData *)GetWindowLongPtr(
                 hWnd, GWLP_USERDATA);
             if (d) {
-                SYSTEMTIME stFrom, stTo;
-                LRESULT rFrom = SendMessage(d->hDateFrom,
-                    DTM_GETSYSTEMTIME, 0, (LPARAM)&stFrom);
-                LRESULT rTo = SendMessage(d->hDateTo,
-                    DTM_GETSYSTEMTIME, 0, (LPARAM)&stTo);
-                if (rFrom == GDT_VALID && rTo == GDT_VALID) {
-                    const char *app = get_selected_app(d->hAppCombo);
-                    stats_refresh_range(d->hListView, d->hTotal,
-                                       &stFrom, &stTo, app, &d->sort);
-                }
+                refresh_app_combo_preserve_sel(d->hAppCombo, false);
+                stats_refresh_from_ui(d);
             }
         }
         return 0;
@@ -1813,10 +1991,47 @@ static void show_stats_window(HWND hParent)
 
     HWND hDlg = CreateWindow("KSC_Stats", "KSC - Statistics",
                  WS_OVERLAPPEDWINDOW,
-                 CW_USEDEFAULT, CW_USEDEFAULT, 710, 420,
+                 CW_USEDEFAULT, CW_USEDEFAULT, 780, 440,
                  hParent, nullptr, g_hInst, nullptr);
     ShowWindow(hDlg, SW_SHOW);
     UpdateWindow(hDlg);
+}
+
+static void export_summary_csv_file(HWND hParent, const SummaryStat *rows,
+                                     int count, const char *firstColName,
+                                     const char *defaultName)
+{
+    OPENFILENAME ofn = {};
+    char filePath[MAX_PATH] = "";
+    if (defaultName && defaultName[0])
+        snprintf(filePath, sizeof(filePath), "%s", defaultName);
+
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = hParent;
+    ofn.lpstrFilter = "CSV Files (*.csv)\0*.csv\0\0";
+    ofn.lpstrFile = filePath;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrDefExt = "csv";
+    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
+    if (!GetSaveFileName(&ofn)) return;
+
+    FILE *f = fopen(filePath, "w");
+    if (!f) {
+        MessageBox(hParent, "Failed to create file.", "Export Error",
+                   MB_OK | MB_ICONERROR);
+        return;
+    }
+    fprintf(f, "%s,Keys,Mouse,Total\n", firstColName);
+    for (int i = 0; i < count; i++) {
+        write_csv_escaped(f, rows[i].label);
+        fprintf(f, ",%lld,%lld,%lld\n",
+                (long long)rows[i].kb_count,
+                (long long)rows[i].mouse_count,
+                (long long)rows[i].total_count);
+    }
+    fclose(f);
+    MessageBox(hParent, "Exported successfully.", "Export",
+               MB_OK | MB_ICONINFORMATION);
 }
 
 static void export_csv_file(HWND hParent, KeyStat *stats, int count,
@@ -1893,20 +2108,6 @@ typedef struct {
     HWND hCountLbl;
     ListViewSortState sort;
 } ViewLogsData;
-
-static void populate_logs_app_combo(HWND hCombo)
-{
-    SendMessage(hCombo, CB_RESETCONTENT, 0, 0);
-    SendMessage(hCombo, CB_ADDSTRING, 0, (LPARAM)"All apps");
-    char **apps = nullptr;
-    int nApps = 0;
-    if (keylog_get_apps(&apps, &nApps)) {
-        for (int i = 0; i < nApps; i++)
-            SendMessage(hCombo, CB_ADDSTRING, 0, (LPARAM)apps[i]);
-        keylog_free_apps(apps, nApps);
-    }
-    SendMessage(hCombo, CB_SETCURSEL, 0, 0);
-}
 
 static bool logs_get_filter_params(const ViewLogsData *d,
                                    char *from, size_t fsz,
@@ -2086,7 +2287,7 @@ static LRESULT CALLBACK ViewLogsWndProc(HWND hWnd, UINT msg,
                          CBS_DROPDOWNLIST | WS_VSCROLL,
                          342, yTop, 135, 200,
                          hWnd, (HMENU)IDC_APP_COMBO, g_hInst, nullptr);
-        populate_logs_app_combo(d->hAppCombo);
+        refresh_app_combo_preserve_sel(d->hAppCombo, true);
 
         CreateWindow(WC_BUTTON, "Refresh",
                      WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
@@ -2207,6 +2408,7 @@ static LRESULT CALLBACK ViewLogsWndProc(HWND hWnd, UINT msg,
             HIWORD(wParam) == BN_CLICKED) {
             ViewLogsData *d = (ViewLogsData *)GetWindowLongPtr(
                 hWnd, GWLP_USERDATA);
+            if (d) refresh_app_combo_preserve_sel(d->hAppCombo, true);
             refresh_logs_list(d);
         } else if (LOWORD(wParam) == IDC_APP_COMBO &&
                    HIWORD(wParam) == CBN_SELCHANGE) {
@@ -2268,32 +2470,29 @@ static void show_view_logs(HWND hParent)
     UpdateWindow(hDlg);
 }
 
-static void format_shortcut(int packed, char *buf, [[maybe_unused]] int bufsize)
+static void format_shortcut(int packed, char *buf, int bufsize)
 {
+    if (!buf || bufsize <= 0) return;
     int vk = packed & 0xFFFF;
     int mod = (packed >> 16) & 0xFFFF;
-    int pos = 0;
-    if (mod & MOD_CONTROL) pos += sprintf(buf + pos, "Ctrl+");
-    if (mod & MOD_SHIFT)   pos += sprintf(buf + pos, "Shift+");
-    if (mod & MOD_ALT)     pos += sprintf(buf + pos, "Alt+");
-    if (mod & MOD_WIN)     pos += sprintf(buf + pos, "Win+");
-    if (vk >= 'A' && vk <= 'Z')
-        sprintf(buf + pos, "%c", (char)vk);
-    else if (vk >= '0' && vk <= '9')
-        sprintf(buf + pos, "%c", (char)vk);
-    else if (vk >= VK_F1 && vk <= VK_F24)
-        sprintf(buf + pos, "F%d", vk - VK_F1 + 1);
-    else
-        sprintf(buf + pos, "Key%d", vk);
+    const char *kname = keyhook_get_name((unsigned int)vk);
+    snprintf(buf, (size_t)bufsize, "%s%s%s%s%s",
+             (mod & MOD_CONTROL) ? "Ctrl+"  : "",
+             (mod & MOD_SHIFT)   ? "Shift+" : "",
+             (mod & MOD_ALT)     ? "Alt+"   : "",
+             (mod & MOD_WIN)     ? "Win+"   : "",
+             kname ? kname : "?");
 }
 
 typedef struct {
     HWND hDlg;
     HWND hMinEdit, hSecEdit, hMsEdit;
     HWND hOffsetEdit;
-    HWND hBtnLeft, hBtnRight;
+    HWND hBtnLeft, hBtnRight, hBtnMiddle;
+    HWND hDoubleChk;
     HWND hContinuous, hLimited;
     HWND hLimitedCount;
+    HWND hPosCur, hPosFixed, hPosX, hPosY, hBtnPick;
     HWND hShortStart, hShortStop;
     HWND hBtnSetStart, hBtnSetStop;
     HWND hBtnStart, hBtnStop;
@@ -2303,14 +2502,52 @@ typedef struct {
     HANDLE hThread;
     int clickedSoFar;
     int capturing;
+    int pickCountdown;
     int hotkeyStartId;
     int hotkeyStopId;
     int intervalMs;
     int offsetMs;
-    BOOL isLeft;
+    int buttonType; /* 0 = left, 1 = right, 2 = middle */
+    BOOL doubleClick;
+    BOOL useFixedPos;
+    int fixedX;
+    int fixedY;
     BOOL continuous;
     int limit;
 } ClickerData;
+
+static void save_clicker_settings(HWND hWnd, const ClickerData *d)
+{
+    int intervalMs = GetDlgItemInt(hWnd, IDC_CLICK_INTERVAL_MIN, nullptr, FALSE) * 60000
+                   + GetDlgItemInt(hWnd, IDC_CLICK_INTERVAL_SEC, nullptr, FALSE) * 1000
+                   + GetDlgItemInt(hWnd, IDC_CLICK_INTERVAL_MS, nullptr, FALSE);
+    if (intervalMs < 10) intervalMs = 10;
+
+    int btnType = 0;
+    if (d && SendMessage(d->hBtnRight, BM_GETCHECK, 0, 0) == BST_CHECKED)
+        btnType = 1;
+    else if (d && SendMessage(d->hBtnMiddle, BM_GETCHECK, 0, 0) == BST_CHECKED)
+        btnType = 2;
+
+    BOOL dbl = (d && SendMessage(d->hDoubleChk, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    BOOL cont = (d && SendMessage(d->hContinuous, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    BOOL fixedPos = (d && SendMessage(d->hPosFixed, BM_GETCHECK, 0, 0) == BST_CHECKED);
+
+    db_set_setting_int("clicker_interval_ms", intervalMs);
+    db_set_setting_int("clicker_random_offset",
+        GetDlgItemInt(hWnd, IDC_CLICK_RANDOM_OFFSET, nullptr, FALSE));
+    db_set_setting_int("clicker_button_type", btnType);
+    db_set_setting_int("clicker_left_button", btnType == 0 ? 1 : 0);
+    db_set_setting_int("clicker_double_click", dbl ? 1 : 0);
+    db_set_setting_int("clicker_continuous", cont ? 1 : 0);
+    db_set_setting_int("clicker_limited_count",
+        GetDlgItemInt(hWnd, IDC_CLICK_LIMITED_COUNT, nullptr, FALSE));
+    db_set_setting_int("clicker_use_fixed_pos", fixedPos ? 1 : 0);
+    db_set_setting_int("clicker_pos_x",
+        (int)GetDlgItemInt(hWnd, IDC_CLICK_POS_X, nullptr, TRUE));
+    db_set_setting_int("clicker_pos_y",
+        (int)GetDlgItemInt(hWnd, IDC_CLICK_POS_Y, nullptr, TRUE));
+}
 
 static int register_clicker_hotkey(HWND hMain, int id, int shortcut)
 {
@@ -2333,27 +2570,42 @@ static DWORD WINAPI ClickerThreadProc(LPVOID param)
 
     int intervalMs = d->intervalMs;
     int offsetMs = d->offsetMs;
-    BOOL isLeft = d->isLeft;
+    int buttonType = d->buttonType;
+    BOOL doubleClick = d->doubleClick;
+    BOOL useFixedPos = d->useFixedPos;
+    int fixedX = d->fixedX;
+    int fixedY = d->fixedY;
     BOOL continuous = d->continuous;
     int limit = d->limit;
     if (intervalMs < 10) intervalMs = 10;
 
     BOOL finishedLimit = FALSE;
     while (d->running) {
+        if (useFixedPos) {
+            SetCursorPos(fixedX, fixedY);
+        }
+
         INPUT inp[2];
         memset(inp, 0, sizeof(inp));
         inp[0].type = INPUT_MOUSE;
         inp[1].type = INPUT_MOUSE;
         inp[0].mi.dwExtraInfo = KSC_INJECTED_MAGIC;
         inp[1].mi.dwExtraInfo = KSC_INJECTED_MAGIC;
-        if (isLeft) {
-            inp[0].mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
-            inp[1].mi.dwFlags = MOUSEEVENTF_LEFTUP;
-        } else {
+        if (buttonType == 1) {
             inp[0].mi.dwFlags = MOUSEEVENTF_RIGHTDOWN;
             inp[1].mi.dwFlags = MOUSEEVENTF_RIGHTUP;
+        } else if (buttonType == 2) {
+            inp[0].mi.dwFlags = MOUSEEVENTF_MIDDLEDOWN;
+            inp[1].mi.dwFlags = MOUSEEVENTF_MIDDLEUP;
+        } else {
+            inp[0].mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+            inp[1].mi.dwFlags = MOUSEEVENTF_LEFTUP;
         }
         SendInput(2, inp, sizeof(INPUT));
+        if (doubleClick && d->running) {
+            Sleep(30);
+            if (d->running) SendInput(2, inp, sizeof(INPUT));
+        }
 
         d->clickedSoFar++;
         if (!continuous && d->clickedSoFar >= limit) {
@@ -2468,12 +2720,20 @@ static LRESULT CALLBACK MouseClickerWndProc(HWND hWnd, UINT msg,
         y += dy;
         d->hBtnLeft = CreateWindow(WC_BUTTON, "Left",
                         WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON | WS_GROUP,
-                        25, y, 70, h, hWnd,
+                        25, y, 65, h, hWnd,
                         (HMENU)IDC_CLICK_BTN_LEFT, g_hInst, nullptr);
         d->hBtnRight = CreateWindow(WC_BUTTON, "Right",
                          WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
-                         120, y, 70, h, hWnd,
+                         100, y, 70, h, hWnd,
                          (HMENU)IDC_CLICK_BTN_RIGHT, g_hInst, nullptr);
+        d->hBtnMiddle = CreateWindow(WC_BUTTON, "Middle",
+                          WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+                          180, y, 75, h, hWnd,
+                          (HMENU)IDC_CLICK_BTN_MIDDLE, g_hInst, nullptr);
+        d->hDoubleChk = CreateWindow(WC_BUTTON, "Double click",
+                          WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                          270, y, 120, h, hWnd,
+                          (HMENU)IDC_CLICK_DOUBLE_CHK, g_hInst, nullptr);
 
         /* Row: Mode */
         y += dy + 8;
@@ -2498,6 +2758,39 @@ static LRESULT CALLBACK MouseClickerWndProc(HWND hWnd, UINT msg,
         CreateWindow(WC_STATIC, "clicks",
                      WS_CHILD | WS_VISIBLE | SS_LEFT,
                      175, y + 2, 50, h, hWnd, nullptr, g_hInst, nullptr);
+
+        /* Row: Position */
+        y += dy + 8;
+        CreateWindow(WC_STATIC, "Click Position:",
+                     WS_CHILD | WS_VISIBLE | SS_LEFT,
+                     xLabel, y, 110, h, hWnd, nullptr, g_hInst, nullptr);
+        y += dy;
+        d->hPosCur = CreateWindow(WC_BUTTON, "Cursor",
+                       WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON | WS_GROUP,
+                       25, y, 70, h, hWnd,
+                       (HMENU)IDC_CLICK_POS_CUR, g_hInst, nullptr);
+        d->hPosFixed = CreateWindow(WC_BUTTON, "Fixed:",
+                         WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+                         100, y, 62, h, hWnd,
+                         (HMENU)IDC_CLICK_POS_FIXED, g_hInst, nullptr);
+        CreateWindow(WC_STATIC, "X:",
+                     WS_CHILD | WS_VISIBLE | SS_LEFT,
+                     165, y + 2, 16, h, hWnd, nullptr, g_hInst, nullptr);
+        d->hPosX = CreateWindow(WC_EDIT, "0",
+                     WS_CHILD | WS_VISIBLE | WS_BORDER,
+                     182, y, 52, h, hWnd,
+                     (HMENU)IDC_CLICK_POS_X, g_hInst, nullptr);
+        CreateWindow(WC_STATIC, "Y:",
+                     WS_CHILD | WS_VISIBLE | SS_LEFT,
+                     240, y + 2, 16, h, hWnd, nullptr, g_hInst, nullptr);
+        d->hPosY = CreateWindow(WC_EDIT, "0",
+                     WS_CHILD | WS_VISIBLE | WS_BORDER,
+                     257, y, 52, h, hWnd,
+                     (HMENU)IDC_CLICK_POS_Y, g_hInst, nullptr);
+        d->hBtnPick = CreateWindow(WC_BUTTON, "Pick (3s)",
+                        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                        318, y, 80, h, hWnd,
+                        (HMENU)IDC_CLICK_BTN_PICK, g_hInst, nullptr);
 
         /* Row: Start Shortcut */
         y += dy + 8;
@@ -2559,10 +2852,19 @@ static LRESULT CALLBACK MouseClickerWndProc(HWND hWnd, UINT msg,
                       intervalMs % 1000, FALSE);
         SetDlgItemInt(hWnd, IDC_CLICK_RANDOM_OFFSET,
                       db_get_setting_int("clicker_random_offset", 0), FALSE);
-        if (db_get_setting_int("clicker_left_button", 1))
-            SendMessage(d->hBtnLeft, BM_SETCHECK, BST_CHECKED, 0);
-        else
+        int btnType = db_get_setting_int("clicker_button_type", -1);
+        if (btnType < 0)
+            btnType = db_get_setting_int("clicker_left_button", 1) ? 0 : 1;
+        if (btnType == 1)
             SendMessage(d->hBtnRight, BM_SETCHECK, BST_CHECKED, 0);
+        else if (btnType == 2)
+            SendMessage(d->hBtnMiddle, BM_SETCHECK, BST_CHECKED, 0);
+        else
+            SendMessage(d->hBtnLeft, BM_SETCHECK, BST_CHECKED, 0);
+
+        if (db_get_setting_int("clicker_double_click", 0))
+            SendMessage(d->hDoubleChk, BM_SETCHECK, BST_CHECKED, 0);
+
         if (db_get_setting_int("clicker_continuous", 1)) {
             SendMessage(d->hContinuous, BM_SETCHECK, BST_CHECKED, 0);
             EnableWindow(d->hLimitedCount, FALSE);
@@ -2572,6 +2874,21 @@ static LRESULT CALLBACK MouseClickerWndProc(HWND hWnd, UINT msg,
         }
         SetDlgItemInt(hWnd, IDC_CLICK_LIMITED_COUNT,
                       db_get_setting_int("clicker_limited_count", 50), FALSE);
+
+        BOOL fixedPos = db_get_setting_int("clicker_use_fixed_pos", 0) != 0;
+        if (fixedPos) {
+            SendMessage(d->hPosFixed, BM_SETCHECK, BST_CHECKED, 0);
+            EnableWindow(d->hPosX, TRUE);
+            EnableWindow(d->hPosY, TRUE);
+        } else {
+            SendMessage(d->hPosCur, BM_SETCHECK, BST_CHECKED, 0);
+            EnableWindow(d->hPosX, FALSE);
+            EnableWindow(d->hPosY, FALSE);
+        }
+        SetDlgItemInt(hWnd, IDC_CLICK_POS_X,
+                      (UINT)db_get_setting_int("clicker_pos_x", 0), TRUE);
+        SetDlgItemInt(hWnd, IDC_CLICK_POS_Y,
+                      (UINT)db_get_setting_int("clicker_pos_y", 0), TRUE);
 
         int startSc = db_get_setting_int("clicker_start_shortcut",
                         (MOD_CONTROL | MOD_SHIFT) << 16 | 'S');
@@ -2614,7 +2931,22 @@ static LRESULT CALLBACK MouseClickerWndProc(HWND hWnd, UINT msg,
             if (GetAsyncKeyState(VK_MENU)    & 0x8000) mod |= MOD_ALT;
             if ((GetAsyncKeyState(VK_LWIN) | GetAsyncKeyState(VK_RWIN))
                 & 0x8000) mod |= MOD_WIN;
-            if (mod == 0) { d->capturing = 0; return 0; }
+            if (mod == 0 || vk == VK_ESCAPE) {
+                char buf[64];
+                if (d->capturing == 1) {
+                    int sc = db_get_setting_int("clicker_start_shortcut",
+                        (MOD_CONTROL | MOD_SHIFT) << 16 | 'S');
+                    format_shortcut(sc, buf, sizeof(buf));
+                    SetWindowText(d->hShortStart, buf);
+                } else {
+                    int sc = db_get_setting_int("clicker_stop_shortcut",
+                        (MOD_CONTROL | MOD_SHIFT) << 16 | 'X');
+                    format_shortcut(sc, buf, sizeof(buf));
+                    SetWindowText(d->hShortStop, buf);
+                }
+                d->capturing = 0;
+                return 0;
+            }
 
             int packed = (mod << 16) | vk;
             char buf[64];
@@ -2665,8 +2997,18 @@ static LRESULT CALLBACK MouseClickerWndProc(HWND hWnd, UINT msg,
             d->intervalMs = intervalMs;
             d->offsetMs = GetDlgItemInt(hWnd, IDC_CLICK_RANDOM_OFFSET,
                                         nullptr, FALSE);
-            d->isLeft = (SendMessage(d->hBtnLeft, BM_GETCHECK, 0, 0)
-                         == BST_CHECKED);
+            if (SendMessage(d->hBtnRight, BM_GETCHECK, 0, 0) == BST_CHECKED)
+                d->buttonType = 1;
+            else if (SendMessage(d->hBtnMiddle, BM_GETCHECK, 0, 0) == BST_CHECKED)
+                d->buttonType = 2;
+            else
+                d->buttonType = 0;
+            d->doubleClick = (SendMessage(d->hDoubleChk, BM_GETCHECK, 0, 0)
+                              == BST_CHECKED);
+            d->useFixedPos = (SendMessage(d->hPosFixed, BM_GETCHECK, 0, 0)
+                              == BST_CHECKED);
+            d->fixedX = (int)GetDlgItemInt(hWnd, IDC_CLICK_POS_X, nullptr, TRUE);
+            d->fixedY = (int)GetDlgItemInt(hWnd, IDC_CLICK_POS_Y, nullptr, TRUE);
             d->continuous = (SendMessage(d->hContinuous, BM_GETCHECK, 0, 0)
                              == BST_CHECKED);
             d->limit = GetDlgItemInt(hWnd, IDC_CLICK_LIMITED_COUNT,
@@ -2721,29 +3063,7 @@ static LRESULT CALLBACK MouseClickerWndProc(HWND hWnd, UINT msg,
                 return 0;
             }
             if (id == IDC_CLICK_BTN_START) {
-                int intervalMs = GetDlgItemInt(hWnd,
-                    IDC_CLICK_INTERVAL_MIN, nullptr, FALSE) * 60000
-                    + GetDlgItemInt(hWnd,
-                    IDC_CLICK_INTERVAL_SEC, nullptr, FALSE) * 1000
-                    + GetDlgItemInt(hWnd,
-                    IDC_CLICK_INTERVAL_MS, nullptr, FALSE);
-                if (intervalMs < 10) intervalMs = 10;
-                BOOL isLeft = (SendMessage(d->hBtnLeft,
-                                BM_GETCHECK, 0, 0) == BST_CHECKED);
-                BOOL continuous = (SendMessage(d->hContinuous,
-                                    BM_GETCHECK, 0, 0) == BST_CHECKED);
-
-                db_set_setting_int("clicker_interval_ms", intervalMs);
-                db_set_setting_int("clicker_random_offset",
-                    GetDlgItemInt(hWnd, IDC_CLICK_RANDOM_OFFSET,
-                                  nullptr, FALSE));
-                db_set_setting_int("clicker_left_button", isLeft ? 1 : 0);
-                db_set_setting_int("clicker_continuous",
-                                   continuous ? 1 : 0);
-                db_set_setting_int("clicker_limited_count",
-                    GetDlgItemInt(hWnd, IDC_CLICK_LIMITED_COUNT,
-                                  nullptr, FALSE));
-
+                save_clicker_settings(hWnd, d);
                 PostMessage(hWnd, WM_CLICKER_CMD, 0, 0);
                 return 0;
             }
@@ -2759,37 +3079,70 @@ static LRESULT CALLBACK MouseClickerWndProc(HWND hWnd, UINT msg,
                 EnableWindow(d->hLimitedCount, TRUE);
                 return 0;
             }
+            if (id == IDC_CLICK_POS_CUR) {
+                EnableWindow(d->hPosX, FALSE);
+                EnableWindow(d->hPosY, FALSE);
+                return 0;
+            }
+            if (id == IDC_CLICK_POS_FIXED) {
+                EnableWindow(d->hPosX, TRUE);
+                EnableWindow(d->hPosY, TRUE);
+                return 0;
+            }
+            if (id == IDC_CLICK_BTN_PICK) {
+                d->pickCountdown = 3;
+                SetWindowText(d->hBtnPick, "Pick (3)...");
+                SetTimer(hWnd, ID_TIMER_REFRESH, 1000, nullptr);
+                return 0;
+            }
         }
         break;
     }
+
+    case WM_TIMER:
+        if (wParam == ID_TIMER_REFRESH) {
+            ClickerData *d = (ClickerData *)GetWindowLongPtr(
+                hWnd, GWLP_USERDATA);
+            if (!d) return 0;
+            d->pickCountdown--;
+            if (d->pickCountdown > 0) {
+                char buf[32];
+                snprintf(buf, sizeof(buf), "Pick (%d)...", d->pickCountdown);
+                SetWindowText(d->hBtnPick, buf);
+            } else {
+                KillTimer(hWnd, ID_TIMER_REFRESH);
+                POINT pt = {};
+                GetCursorPos(&pt);
+                SetDlgItemInt(hWnd, IDC_CLICK_POS_X, (UINT)pt.x, TRUE);
+                SetDlgItemInt(hWnd, IDC_CLICK_POS_Y, (UINT)pt.y, TRUE);
+                SendMessage(d->hPosCur, BM_SETCHECK, BST_UNCHECKED, 0);
+                SendMessage(d->hPosFixed, BM_SETCHECK, BST_CHECKED, 0);
+                EnableWindow(d->hPosX, TRUE);
+                EnableWindow(d->hPosY, TRUE);
+                SetWindowText(d->hBtnPick, "Pick (3s)");
+                char st[64];
+                snprintf(st, sizeof(st), "Status: Picked (%ld, %ld)",
+                         pt.x, pt.y);
+                SetWindowText(d->hStatus, st);
+            }
+            return 0;
+        }
+        break;
 
     case WM_THEME_CHANGED:
         handle_theme_changed(hWnd);
         return 0;
 
     case WM_CLOSE: {
-        int intervalMs = GetDlgItemInt(hWnd,
-            IDC_CLICK_INTERVAL_MIN, nullptr, FALSE) * 60000
-            + GetDlgItemInt(hWnd,
-            IDC_CLICK_INTERVAL_SEC, nullptr, FALSE) * 1000
-            + GetDlgItemInt(hWnd,
-            IDC_CLICK_INTERVAL_MS, nullptr, FALSE);
-        db_set_setting_int("clicker_interval_ms", intervalMs);
-        db_set_setting_int("clicker_random_offset",
-            GetDlgItemInt(hWnd, IDC_CLICK_RANDOM_OFFSET, nullptr, FALSE));
-        db_set_setting_int("clicker_left_button",
-            (SendMessage(GetDlgItem(hWnd, IDC_CLICK_BTN_LEFT),
-             BM_GETCHECK, 0, 0) == BST_CHECKED) ? 1 : 0);
-        db_set_setting_int("clicker_continuous",
-            (SendMessage(GetDlgItem(hWnd, IDC_CLICK_MODE_CONT),
-             BM_GETCHECK, 0, 0) == BST_CHECKED) ? 1 : 0);
-        db_set_setting_int("clicker_limited_count",
-            GetDlgItemInt(hWnd, IDC_CLICK_LIMITED_COUNT, nullptr, FALSE));
+        ClickerData *d = (ClickerData *)GetWindowLongPtr(
+            hWnd, GWLP_USERDATA);
+        save_clicker_settings(hWnd, d);
         ShowWindow(hWnd, SW_HIDE);
         return 0;
     }
 
     case WM_DESTROY: {
+        KillTimer(hWnd, ID_TIMER_REFRESH);
         ClickerData *d = (ClickerData *)GetWindowLongPtr(
             hWnd, GWLP_USERDATA);
         if (d) {
@@ -2811,6 +3164,7 @@ typedef struct {
     HWND hStatus;
     HWND hLoginBtn;
     HWND hCompressChk;
+    HWND hKeepCombo;
     HWND hListView;
     int  loggedIn;
     ListViewSortState sort;
@@ -2947,12 +3301,29 @@ static LRESULT CALLBACK CloudBackupWndProc(HWND hWnd, UINT msg,
                      10, y, 100, 26, hWnd,
                      (HMENU)IDC_CLOUD_BACKUP_NOW, g_hInst, nullptr);
         d->hCompressChk = CreateWindow("BUTTON",
-                     "Compress backups (.zip) before uploading",
+                     "Compress (.zip) before upload",
                      WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                     125, y + 2, 290, 22, hWnd,
+                     118, y + 2, 225, 22, hWnd,
                      (HMENU)IDC_CLOUD_COMPRESS_CHK, g_hInst, nullptr);
         if (cloudsync_get_compress())
             SendMessage(d->hCompressChk, BM_SETCHECK, BST_CHECKED, 0);
+
+        CreateWindow(WC_STATIC, "Keep last:",
+                     WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
+                     350, y + 2, 66, 22, hWnd, nullptr, g_hInst, nullptr);
+        d->hKeepCombo = CreateWindow(WC_COMBOBOX, "",
+                     WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+                     418, y + 2, 115, 160, hWnd,
+                     (HMENU)IDC_CLOUD_KEEP_COMBO, g_hInst, nullptr);
+        SendMessage(d->hKeepCombo, CB_ADDSTRING, 0, (LPARAM)"All backups");
+        SendMessage(d->hKeepCombo, CB_ADDSTRING, 0, (LPARAM)"10 backups");
+        SendMessage(d->hKeepCombo, CB_ADDSTRING, 0, (LPARAM)"30 backups");
+        SendMessage(d->hKeepCombo, CB_ADDSTRING, 0, (LPARAM)"50 backups");
+        {
+            int kc = cloudsync_get_keep_count();
+            int selIdx = (kc == 10) ? 1 : (kc == 30) ? 2 : (kc == 50) ? 3 : 0;
+            SendMessage(d->hKeepCombo, CB_SETCURSEL, selIdx, 0);
+        }
 
         y += 36;
         CreateWindow(WC_STATIC, "\x1a\x1a\x1a SSH Target \x1a\x1a\x1a",
@@ -3100,11 +3471,13 @@ static LRESULT CALLBACK CloudBackupWndProc(HWND hWnd, UINT msg,
                     "Status: Not logged in");
                 SetWindowText(d->hLoginBtn, "Login");
             } else {
+                EnableWindow(d->hLoginBtn, FALSE);
                 SetWindowText(d->hStatus,
                     "Status: Opening browser...");
                 ShowWindow(hWnd, SW_MINIMIZE);
                 cloudsync_login(hWnd);
                 if (!IsWindow(hWnd)) return 0;
+                EnableWindow(d->hLoginBtn, TRUE);
                 ShowWindow(hWnd, SW_RESTORE);
                 d->loggedIn = cloudsync_is_logged_in();
                 char buf[256];
@@ -3123,6 +3496,14 @@ static LRESULT CALLBACK CloudBackupWndProc(HWND hWnd, UINT msg,
             int chk = (SendMessage(d->hCompressChk, BM_GETCHECK, 0, 0)
                        == BST_CHECKED) ? 1 : 0;
             cloudsync_set_compress(chk);
+            return 0;
+        }
+
+        if (id == IDC_CLOUD_KEEP_COMBO &&
+            HIWORD(wParam) == CBN_SELCHANGE) {
+            int sel = (int)SendMessage(d->hKeepCombo, CB_GETCURSEL, 0, 0);
+            int vals[] = {0, 10, 30, 50};
+            cloudsync_set_keep_count((sel >= 0 && sel <= 3) ? vals[sel] : 0);
             return 0;
         }
 
@@ -3274,7 +3655,7 @@ static void show_mouse_clicker(HWND hParent)
     }
     HWND hDlg = CreateWindow("KSC_MouseClicker", "ksc - Mouse Clicker",
                  WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-                 CW_USEDEFAULT, CW_USEDEFAULT, 440, 470,
+                 CW_USEDEFAULT, CW_USEDEFAULT, 440, 540,
                  hParent, nullptr, g_hInst, nullptr);
     g_hClickerWnd = hDlg;
     ShowWindow(hDlg, SW_SHOW);
@@ -3365,6 +3746,33 @@ static void unregister_kbsim_hotkey(HWND hMain, int id)
     UnregisterHotKey(hMain, id);
 }
 
+static bool is_extended_vk(int vk)
+{
+    switch (vk) {
+    case VK_INSERT:
+    case VK_DELETE:
+    case VK_HOME:
+    case VK_END:
+    case VK_PRIOR:
+    case VK_NEXT:
+    case VK_LEFT:
+    case VK_UP:
+    case VK_RIGHT:
+    case VK_DOWN:
+    case VK_DIVIDE:
+    case VK_NUMLOCK:
+    case VK_SNAPSHOT:
+    case VK_RCONTROL:
+    case VK_RMENU:
+    case VK_LWIN:
+    case VK_RWIN:
+    case VK_APPS:
+        return true;
+    default:
+        return false;
+    }
+}
+
 static DWORD WINAPI KbSimThreadProc(LPVOID param)
 {
     KbSimData *d = (KbSimData *)param;
@@ -3415,43 +3823,45 @@ static DWORD WINAPI KbSimThreadProc(LPVOID param)
             if (mod & MOD_CONTROL) { modDown[nM].type = INPUT_KEYBOARD; modDown[nM].ki.wVk = VK_CONTROL; modDown[nM].ki.dwExtraInfo = KSC_INJECTED_MAGIC; nM++; }
             if (mod & MOD_SHIFT)   { modDown[nM].type = INPUT_KEYBOARD; modDown[nM].ki.wVk = VK_SHIFT;   modDown[nM].ki.dwExtraInfo = KSC_INJECTED_MAGIC; nM++; }
             if (mod & MOD_ALT)     { modDown[nM].type = INPUT_KEYBOARD; modDown[nM].ki.wVk = VK_MENU;    modDown[nM].ki.dwExtraInfo = KSC_INJECTED_MAGIC; nM++; }
-            if (mod & MOD_WIN)     { modDown[nM].type = INPUT_KEYBOARD; modDown[nM].ki.wVk = VK_LWIN;    modDown[nM].ki.dwExtraInfo = KSC_INJECTED_MAGIC; nM++; }
+            if (mod & MOD_WIN)     { modDown[nM].type = INPUT_KEYBOARD; modDown[nM].ki.wVk = VK_LWIN;    modDown[nM].ki.dwFlags = KEYEVENTF_EXTENDEDKEY; modDown[nM].ki.dwExtraInfo = KSC_INJECTED_MAGIC; nM++; }
             if (nM > 0) SendInput(nM, modDown, sizeof(INPUT));
 
             if (!d->running) { /* release mods and exit */
                 for (int j = 0; j < nM; j++) {
-                    modDown[j].ki.dwFlags = KEYEVENTF_KEYUP;
+                    modDown[j].ki.dwFlags |= KEYEVENTF_KEYUP;
                 }
                 if (nM > 0) SendInput(nM, modDown, sizeof(INPUT));
                 break;
             }
 
             /* key-down */
+            DWORD extFlag = is_extended_vk(vk) ? KEYEVENTF_EXTENDEDKEY : 0;
             INPUT kd;
             memset(&kd, 0, sizeof(kd));
             kd.type = INPUT_KEYBOARD;
             kd.ki.wVk = (WORD)vk;
+            kd.ki.dwFlags = extFlag;
             kd.ki.dwExtraInfo = KSC_INJECTED_MAGIC;
             SendInput(1, &kd, sizeof(INPUT));
             Sleep(10);
 
             if (!d->running) {
-                kd.ki.dwFlags = KEYEVENTF_KEYUP;
+                kd.ki.dwFlags = extFlag | KEYEVENTF_KEYUP;
                 SendInput(1, &kd, sizeof(INPUT));
                 for (int j = 0; j < nM; j++) {
-                    modDown[j].ki.dwFlags = KEYEVENTF_KEYUP;
+                    modDown[j].ki.dwFlags |= KEYEVENTF_KEYUP;
                 }
                 if (nM > 0) SendInput(nM, modDown, sizeof(INPUT));
                 break;
             }
 
             /* key-up */
-            kd.ki.dwFlags = KEYEVENTF_KEYUP;
+            kd.ki.dwFlags = extFlag | KEYEVENTF_KEYUP;
             SendInput(1, &kd, sizeof(INPUT));
 
             /* release modifiers */
             for (int j = 0; j < nM; j++)
-                modDown[j].ki.dwFlags = KEYEVENTF_KEYUP;
+                modDown[j].ki.dwFlags |= KEYEVENTF_KEYUP;
             if (nM > 0) SendInput(nM, modDown, sizeof(INPUT));
 
             if (i < nKeys - 1) Sleep(10);
@@ -3728,9 +4138,20 @@ static LRESULT CALLBACK KeyboardSimWndProc(HWND hWnd, UINT msg,
             if (GetAsyncKeyState(VK_MENU)    & 0x8000) mod |= MOD_ALT;
             if ((GetAsyncKeyState(VK_LWIN) | GetAsyncKeyState(VK_RWIN))
                 & 0x8000) mod |= MOD_WIN;
-            if (mod == 0 && d->capturing != 1) {
+            if (d->capturing != 1 && (mod == 0 || vk == VK_ESCAPE)) {
+                char buf[64];
+                if (d->capturing == 2) {
+                    int ss = db_get_setting_int("kbsim_start_shortcut",
+                        (MOD_CONTROL | MOD_SHIFT) << 16 | 'J');
+                    format_shortcut(ss, buf, sizeof(buf));
+                    SetWindowText(d->hShortStart, buf);
+                } else if (d->capturing == 3) {
+                    int st = db_get_setting_int("kbsim_stop_shortcut",
+                        (MOD_CONTROL | MOD_SHIFT) << 16 | 'M');
+                    format_shortcut(st, buf, sizeof(buf));
+                    SetWindowText(d->hShortStop, buf);
+                }
                 d->capturing = 0;
-                SetWindowText(d->hRecordBtn, "Record");
                 return 0;
             }
 
@@ -4051,6 +4472,7 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg,
         ListView_InsertColumn(g_hListView, 1, &lvc);
 
         SetTimer(hWnd, ID_TIMER_REFRESH, 1000, nullptr);
+        SetTimer(hWnd, ID_TIMER_STATUS, 1000, nullptr);
 
         {
             int cs = cloudsync_get_schedule();
@@ -4065,6 +4487,7 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg,
         HMENU hMenu = CreateMenu();
         HMENU hFileMenu = CreatePopupMenu();
         AppendMenu(hFileMenu, MF_STRING, IDM_SETTINGS, "Settings");
+        AppendMenu(hFileMenu, MF_STRING, IDM_PAUSE_TRACKING, "Pause Tracking");
         AppendMenu(hFileMenu, MF_STRING, IDM_HEATMAP, "Key Heatmap");
         AppendMenu(hFileMenu, MF_STRING, IDM_STATS, "Stats");
         AppendMenu(hFileMenu, MF_STRING, IDM_VIEW_LOGS, "View Logs");
@@ -4147,13 +4570,21 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg,
     }
 
     case WM_TIMER:
-        if (wParam == ID_TIMER_REFRESH) {
+        if (wParam == ID_TIMER_STATUS) {
+            update_main_status_bar();
+            tray_update_tip(hWnd, TRAY_ID);
+        } else if (wParam == ID_TIMER_REFRESH) {
             refresh_list_view();
             tray_update_tip(hWnd, TRAY_ID);
         } else if (wParam == ID_TIMER_CLOUD_SYNC) {
             HWND hCloud = FindWindow("KSC_CloudBackup", nullptr);
             cloudsync_backup_trigger(hCloud);
         }
+        return 0;
+
+    case WM_INITMENUPOPUP:
+        CheckMenuItem((HMENU)wParam, IDM_PAUSE_TRACKING,
+            MF_BYCOMMAND | (keyhook_is_paused() ? MF_CHECKED : MF_UNCHECKED));
         return 0;
 
     case WM_THEME_CHANGED:
@@ -4231,6 +4662,18 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg,
         case IDM_SETTINGS:
             show_settings(hWnd);
             break;
+        case IDM_PAUSE_TRACKING: {
+            bool paused = !keyhook_is_paused();
+            keyhook_set_paused(paused);
+            HMENU hMenu = GetMenu(hWnd);
+            if (hMenu) {
+                CheckMenuItem(hMenu, IDM_PAUSE_TRACKING,
+                    MF_BYCOMMAND | (paused ? MF_CHECKED : MF_UNCHECKED));
+            }
+            update_main_status_bar();
+            tray_update_tip(hWnd, TRAY_ID);
+            break;
+        }
         case IDM_HEATMAP:
             show_heatmap(hWnd);
             break;
@@ -4453,9 +4896,18 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg,
         {
             HWND hKb = FindWindow("KSC_KeyboardSim", nullptr);
             if (hKb) DestroyWindow(hKb);
+            if (g_hClickerWnd && IsWindow(g_hClickerWnd))
+                DestroyWindow(g_hClickerWnd);
         }
+        UnregisterHotKey(hWnd, HOTKEY_ID_SHOW_KSC);
+        UnregisterHotKey(hWnd, HOTKEY_ID_START_CLICK);
+        UnregisterHotKey(hWnd, HOTKEY_ID_STOP_CLICK);
+        UnregisterHotKey(hWnd, HOTKEY_ID_START_KBSIM);
+        UnregisterHotKey(hWnd, HOTKEY_ID_STOP_KBSIM);
         if (g_hDarkBrush) { DeleteObject(g_hDarkBrush); g_hDarkBrush = nullptr; }
         if (g_hLvBrush)   { DeleteObject(g_hLvBrush);   g_hLvBrush = nullptr;   }
+        if (g_hAppIcon)   { DestroyIcon(g_hAppIcon);    g_hAppIcon = nullptr;   }
+        KillTimer(hWnd, ID_TIMER_STATUS);
         KillTimer(hWnd, ID_TIMER_REFRESH);
         KillTimer(hWnd, ID_TIMER_CLOUD_SYNC);
         PostQuitMessage(0);

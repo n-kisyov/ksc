@@ -9,6 +9,7 @@ static HANDLE g_thread = nullptr;
 static HANDLE g_readyEvent = nullptr;
 static DWORD g_thread_id = 0;
 static volatile bool g_keyloggerEnabled = false;
+static volatile bool g_paused = false;
 
 #define WPM_RING_SIZE 1024
 static ULONGLONG g_wpmRing[WPM_RING_SIZE];
@@ -205,18 +206,56 @@ const char *keyhook_get_name(unsigned int vk_code)
 
 static void record_hook_event(int vk_code, const char *name)
 {
-    char app[256] = "";
+    static DWORD s_lastPid = 0;
+    static char s_lastExe[128] = "";
+
+    char exeName[128] = "";
+    char winTitle[256] = "";
     HWND hFg = GetForegroundWindow();
-    if (hFg) GetWindowText(hFg, app, sizeof(app));
-    db_queue_event(vk_code, name, app);
-    if (g_keyloggerEnabled)
-        keylog_queue_event(name, vk_code, app);
+    if (hFg) {
+        DWORD pid = 0;
+        GetWindowThreadProcessId(hFg, &pid);
+        if (pid != 0) {
+            if (pid == s_lastPid) {
+                snprintf(exeName, sizeof(exeName), "%s", s_lastExe);
+            } else {
+                HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,
+                                           FALSE, pid);
+                if (hProc) {
+                    char fullPath[MAX_PATH] = "";
+                    DWORD sz = sizeof(fullPath);
+                    if (QueryFullProcessImageNameA(hProc, 0, fullPath, &sz)) {
+                        const char *base = strrchr(fullPath, '\\');
+                        const char *part = base ? (base + 1) : fullPath;
+                        snprintf(exeName, sizeof(exeName), "%s", part);
+                    }
+                    CloseHandle(hProc);
+                }
+                s_lastPid = pid;
+                snprintf(s_lastExe, sizeof(s_lastExe), "%s", exeName);
+            }
+        }
+        if (g_keyloggerEnabled || exeName[0] == '\0') {
+            GetWindowText(hFg, winTitle, sizeof(winTitle));
+        }
+    }
+
+    const char *statsApp = exeName[0] ? exeName : winTitle;
+    db_queue_event(vk_code, name, statsApp);
+    if (g_keyloggerEnabled) {
+        char klogApp[256] = "";
+        if (exeName[0] && winTitle[0])
+            snprintf(klogApp, sizeof(klogApp), "%s (%s)", exeName, winTitle);
+        else
+            snprintf(klogApp, sizeof(klogApp), "%s", statsApp);
+        keylog_queue_event(name, vk_code, klogApp);
+    }
 }
 
 static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam,
                                               LPARAM lParam)
 {
-    if (nCode == HC_ACTION) {
+    if (nCode == HC_ACTION && !g_paused) {
         const KBDLLHOOKSTRUCT *p = (const KBDLLHOOKSTRUCT *)lParam;
         if (p->dwExtraInfo != KSC_INJECTED_MAGIC &&
             (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN)) {
@@ -231,7 +270,7 @@ static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam,
 static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam,
                                            LPARAM lParam)
 {
-    if (nCode == HC_ACTION) {
+    if (nCode == HC_ACTION && !g_paused) {
         const MSLLHOOKSTRUCT *pm = (const MSLLHOOKSTRUCT *)lParam;
         if (pm->dwExtraInfo != KSC_INJECTED_MAGIC) {
             int vk = 0;
@@ -310,4 +349,14 @@ void keyhook_stop(void)
 void keyhook_set_keylogger_enabled(bool enabled)
 {
     g_keyloggerEnabled = enabled;
+}
+
+void keyhook_set_paused(bool paused)
+{
+    g_paused = paused;
+}
+
+bool keyhook_is_paused(void)
+{
+    return g_paused;
 }

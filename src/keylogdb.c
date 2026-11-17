@@ -18,36 +18,53 @@ static int g_klogCount = 0;
 static int g_klogWrite = 0;
 static int g_klogRead  = 0;
 static CRITICAL_SECTION g_klogCs;
+static SRWLOCK g_klogWriteLock = SRWLOCK_INIT;
 static bool g_klogCsInit = false;
 static HANDLE g_klogSignal = nullptr;
 static HANDLE g_klogThread = nullptr;
 static volatile bool g_klogRunning = false;
 
-static void keylog_drain_events_locked(void)
+static int keylog_copy_events_locked(KlogEvent *batch, bool *outStop)
 {
-    if (g_klogCount > 0 && g_klogDb) {
+    int n = 0;
+    while (g_klogCount > 0 && n < KLOG_BUF_SIZE) {
+        batch[n++] = g_klogBuf[g_klogRead];
+        g_klogRead = (g_klogRead + 1) % KLOG_BUF_SIZE;
+        g_klogCount--;
+    }
+    if (outStop) {
+        *outStop = (!g_klogRunning && g_klogCount == 0);
+    }
+    return n;
+}
+
+static void keylog_write_batch(const KlogEvent *batch, int count)
+{
+    AcquireSRWLockExclusive(&g_klogWriteLock);
+    if (count > 0 && g_klogDb) {
         sqlite3_exec(g_klogDb, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr);
-        while (g_klogCount > 0) {
-            const KlogEvent *e = &g_klogBuf[g_klogRead];
-            keylog_insert(e->key_name, e->vk_code, e->app);
-            g_klogRead = (g_klogRead + 1) % KLOG_BUF_SIZE;
-            g_klogCount--;
+        for (int i = 0; i < count; i++) {
+            keylog_insert(batch[i].key_name, batch[i].vk_code, batch[i].app);
         }
         sqlite3_exec(g_klogDb, "COMMIT", nullptr, nullptr, nullptr);
     }
+    ReleaseSRWLockExclusive(&g_klogWriteLock);
 }
 
 static DWORD WINAPI klog_writer_thread([[maybe_unused]] LPVOID param)
 {
+    KlogEvent batch[KLOG_BUF_SIZE];
     for (;;) {
         WaitForSingleObject(g_klogSignal, 100);
         EnterCriticalSection(&g_klogCs);
-        keylog_drain_events_locked();
-        if (!g_klogRunning && g_klogCount == 0) {
-            LeaveCriticalSection(&g_klogCs);
-            break;
-        }
+        bool stop = false;
+        int n = keylog_copy_events_locked(batch, &stop);
         LeaveCriticalSection(&g_klogCs);
+
+        if (n > 0) {
+            keylog_write_batch(batch, n);
+        }
+        if (stop) break;
     }
     return 0;
 }
@@ -388,9 +405,11 @@ void keylog_queue_event(const char *key_name, int vk_code,
 void keylog_flush_events(void)
 {
     if (!g_klogCsInit || !g_klogSignal) return;
+    KlogEvent batch[KLOG_BUF_SIZE];
     EnterCriticalSection(&g_klogCs);
-    keylog_drain_events_locked();
+    int n = keylog_copy_events_locked(batch, nullptr);
     LeaveCriticalSection(&g_klogCs);
+    keylog_write_batch(batch, n);
 }
 
 int keylog_backup_safe(const char *destPath)

@@ -21,22 +21,23 @@
 ## ✨ Features
 
 ### ⌨️ Core Tracking
-- **Keystroke & mouse counting** — Low-level hooks (`WH_KEYBOARD_LL` + `WH_MOUSE_LL`) capture every keypress and left/middle/right/X1/X2 mouse clicks system‑wide (excluding app‑injected simulator/clicker input)
-- **Per‑app tracking** — Records which foreground window received each event
-- **Live totals & typing speed** — Total keyboard vs mouse clicks, Today's count, and rolling live WPM / session Peak WPM in the status bar and tray tooltip
-- **Batch writes** — Ring buffer + writer threads flush in `BEGIN/COMMIT` transactions per ~100ms
+- **Keystroke & mouse counting** — Low-level hooks (`WH_KEYBOARD_LL` + `WH_MOUSE_LL`) capture every keypress and left/middle/right/X1/X2 mouse clicks system‑wide (excluding app‑injected simulator/clicker input), with a **Pause Tracking** toggle in the File & tray menus
+- **Per‑app tracking** — Records foreground process executable name (e.g. `chrome.exe`, `code.exe`) with full window title preserved in the keylogger
+- **Live totals & typing speed** — 1‑second status bar and tray tooltip updates showing total keyboard/mouse counts, Today's count, and rolling live WPM / session Peak WPM
+- **Lock‑free batch writes** — Ring buffer copied out under critical section so hook callbacks never block on SQLite `BEGIN/COMMIT` disk flushes
 
 ### 🪟 Windows & Views
 - **Keyboard heatmap** — Full QWERTY + numpad + arrow keys + 5 mouse buttons (`LMB`, `MMB`, `RMB`, `M4`, `M5`) colored by usage frequency (blue → red gradient), hover readout panel, per‑app and time‑period filters (`All Time`, `Today`, `Last 7 Days`, `Last 30 Days`), double‑buffered rendering
-- **Statistics** — Custom date range pickers, app filter, keyboard/mouse separated totals, sortable columns, 10s auto‑refresh, properly escaped CSV export
+- **Statistics** — Custom date range pickers, app filter, **By Key / By Application / By Day** view modes, keyboard/mouse separated totals, sortable columns with header sort arrows, 10s auto‑refresh preserving scroll position, properly escaped CSV export
 - **Keylogger** — Timestamped per‑key recording to a separate `ksc_keylog.db`; dedicated viewer window with date, app, and live keyword search filters, sortable columns, entry counter, and CSV export
-- **Mouse clicker** — Configurable click interval (min/sec/ms), random offset, left/right button, continuous/limited mode, system‑wide start/stop hotkeys
-- **Keyboard simulator** — Record up to 128 key combo sequences, replay with interval + random offset, system‑wide start/stop hotkeys
+- **Mouse clicker** — Configurable click interval (min/sec/ms), random offset, Left/Right/Middle button, single or double click, Cursor or Fixed `(X, Y)` coordinates with 3‑second cursor picker, continuous/limited mode, system‑wide start/stop hotkeys
+- **Keyboard simulator** — Record up to 128 key combo sequences, replay with interval + random offset (including extended keys), system‑wide start/stop hotkeys
 
 ### ☁️ Cloud Backup
 - **Google Drive** — OAuth2 with PKCE login via browser, `ksc-backups` folder auto‑created in Drive root, DPAPI‑encrypted token storage
 - **SSH / SFTP** — libssh2 with OpenSSL backend, uploads to `~/ksc-backups`, password encrypted with DPAPI
 - **Switchable ZIP compression** — Optional checkbox to compress each database into a separate `.zip` archive before uploading
+- **Retention limit** — Auto‑prune older backups on Drive and SSH (`All`, `10`, `30`, or `50` backups)
 - **Scheduler** — Off / 5 min / 15 min / 30 min / 1 h / 12 h / daily
 - **Multi‑target** — Backups go to Drive, SSH, or both; local files deleted only after ALL targets succeed
 - **Safe online backup** — Uses `sqlite3_backup_init()` API (WAL‑safe) for both main and keylogger databases
@@ -55,7 +56,7 @@
 
 ### 🛠️ Data Management
 - **Safe backup & restore** — Online backup via Save dialog (`.zip` or `.db` for both main and companion keylogger DB); one‑click restore from `.db` or `.zip`
-- **Portable mode** — Pass `--portable` or place an empty `portable.txt` next to `ksc.exe` to store databases in a local `data\` folder instead of `%APPDATA%\KSC`
+- **Portable mode** — Pass `--portable` or place an empty `portable.txt` next to `ksc.exe` to store databases alongside the executable instead of `%APPDATA%\KSC`
 - **CSV export** — All‑time, date‑filtered, or keylogger search‑filtered CSV export
 - **Reset statistics** — Wipe counts, keep settings
 - **Single instance** — Named mutex prevents duplicate processes and focuses the running window

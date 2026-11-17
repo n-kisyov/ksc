@@ -57,6 +57,7 @@ constexpr int TRAY_ID = 1;
 #define IDM_KEYLOG_TOGGLE       1013
 #define IDM_CLOUD_BACKUP        1014
 #define IDM_KEYBOARD_SIM        1015
+#define IDM_PAUSE_TRACKING      1016
 
 #define IDC_LISTVIEW            2001
 #define IDC_STARTUP_CHK          2002
@@ -137,6 +138,15 @@ constexpr int TRAY_ID = 1;
 #define IDC_LOGS_SEARCH_EDIT     2079
 #define IDC_LOGS_EXPORT_BTN      2080
 #define IDC_LOGS_COUNT_LBL       2081
+#define IDC_STATS_VIEW_COMBO     2082
+#define IDC_CLICK_BTN_MIDDLE     2083
+#define IDC_CLICK_DOUBLE_CHK     2084
+#define IDC_CLICK_POS_CUR        2085
+#define IDC_CLICK_POS_FIXED      2086
+#define IDC_CLICK_POS_X          2087
+#define IDC_CLICK_POS_Y          2088
+#define IDC_CLICK_BTN_PICK       2089
+#define IDC_CLOUD_KEEP_COMBO     2090
 
 constexpr ULONG_PTR KSC_INJECTED_MAGIC = 0x4B534331ULL;
 
@@ -151,5 +161,6 @@ constexpr int HOTKEY_ID_STOP_KBSIM  = 104;
 
 constexpr int ID_TIMER_REFRESH    = 1;
 constexpr int ID_TIMER_CLOUD_SYNC = 2;
+constexpr int ID_TIMER_STATUS     = 3;
 
 #endif

@@ -10,8 +10,16 @@ typedef struct {
     int64_t count;
 } KeyStat;
 
+typedef struct {
+    char label[256];
+    int64_t kb_count;
+    int64_t mouse_count;
+    int64_t total_count;
+} SummaryStat;
+
 void db_set_portable_mode(bool portable);
 [[nodiscard]] bool db_is_portable_mode(void);
+[[nodiscard]] bool db_is_portable_override(void);
 
 [[nodiscard]] int db_init(void);
 void db_close(void);
@@ -20,6 +28,12 @@ void db_increment_key(int key_code, const char *key_name, const char *app);
 [[nodiscard]] int db_get_date_range_stats(const char *from, const char *to,
                              const char *app, int detailed,
                              KeyStat **out_stats);
+[[nodiscard]] int db_get_app_stats(const char *from, const char *to,
+                                   SummaryStat **out_stats);
+[[nodiscard]] int db_get_daily_stats(const char *from, const char *to,
+                                     const char *app,
+                                     SummaryStat **out_stats);
+void db_free_summary_stats(SummaryStat *stats);
 void db_free_stats(KeyStat *stats);
 [[nodiscard]] int db_get_distinct_apps(char ***out_apps, int *out_count);
 void db_free_apps(char **apps, int count);

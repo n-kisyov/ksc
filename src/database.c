@@ -17,6 +17,7 @@ static int g_eventCount = 0;
 static int g_eventWrite = 0;
 static int g_eventRead  = 0;
 static CRITICAL_SECTION g_eventCs;
+static SRWLOCK g_dbWriteLock = SRWLOCK_INIT;
 static bool g_csInitialized = false;
 static HANDLE g_eventSignal = nullptr;
 static HANDLE g_writerThread = nullptr;
@@ -26,6 +27,11 @@ static bool g_portableOverride = false;
 void db_set_portable_mode(bool portable)
 {
     g_portableOverride = portable;
+}
+
+bool db_is_portable_override(void)
+{
+    return g_portableOverride;
 }
 
 bool db_is_portable_mode(void)
@@ -78,32 +84,48 @@ void db_get_db_dir(char *buf, int bufsize)
     }
 }
 
-static void db_drain_events_locked(void)
+static int db_copy_events_locked(KeyEvent *batch, bool *outStop)
 {
-    if (g_eventCount > 0 && g_db) {
+    int n = 0;
+    while (g_eventCount > 0 && n < EVENT_BUF_SIZE) {
+        batch[n++] = g_eventBuf[g_eventRead];
+        g_eventRead = (g_eventRead + 1) % EVENT_BUF_SIZE;
+        g_eventCount--;
+    }
+    if (outStop) {
+        *outStop = (!g_writerRunning && g_eventCount == 0);
+    }
+    return n;
+}
+
+static void db_write_batch(const KeyEvent *batch, int count)
+{
+    AcquireSRWLockExclusive(&g_dbWriteLock);
+    if (count > 0 && g_db) {
         sqlite3_exec(g_db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr);
-        while (g_eventCount > 0) {
-            const KeyEvent *e = &g_eventBuf[g_eventRead];
-            db_increment_key(e->key_code, e->key_name, e->app);
-            g_eventRead = (g_eventRead + 1) % EVENT_BUF_SIZE;
-            g_eventCount--;
+        for (int i = 0; i < count; i++) {
+            db_increment_key(batch[i].key_code, batch[i].key_name, batch[i].app);
         }
         sqlite3_exec(g_db, "COMMIT", nullptr, nullptr, nullptr);
     }
+    ReleaseSRWLockExclusive(&g_dbWriteLock);
 }
 
 static DWORD WINAPI db_writer_thread([[maybe_unused]] LPVOID param)
 {
+    KeyEvent batch[EVENT_BUF_SIZE];
     for (;;) {
         WaitForSingleObject(g_eventSignal, 100);
 
         EnterCriticalSection(&g_eventCs);
-        db_drain_events_locked();
-        if (!g_writerRunning && g_eventCount == 0) {
-            LeaveCriticalSection(&g_eventCs);
-            break;
-        }
+        bool stop = false;
+        int n = db_copy_events_locked(batch, &stop);
         LeaveCriticalSection(&g_eventCs);
+
+        if (n > 0) {
+            db_write_batch(batch, n);
+        }
+        if (stop) break;
     }
     return 0;
 }
@@ -545,9 +567,11 @@ void db_queue_event(int key_code, const char *key_name, const char *app)
 void db_flush_events(void)
 {
     if (!g_csInitialized || !g_eventSignal) return;
+    KeyEvent batch[EVENT_BUF_SIZE];
     EnterCriticalSection(&g_eventCs);
-    db_drain_events_locked();
+    int n = db_copy_events_locked(batch, nullptr);
     LeaveCriticalSection(&g_eventCs);
+    db_write_batch(batch, n);
 }
 
 void db_reset_stats(void)
@@ -558,15 +582,103 @@ void db_reset_stats(void)
         g_eventCount = 0;
         g_eventWrite = 0;
         g_eventRead = 0;
-        sqlite3_exec(g_db,
-            "DELETE FROM key_counts; DELETE FROM key_daily;",
-            nullptr, nullptr, nullptr);
         LeaveCriticalSection(&g_eventCs);
-    } else {
-        sqlite3_exec(g_db,
-            "DELETE FROM key_counts; DELETE FROM key_daily;",
-            nullptr, nullptr, nullptr);
     }
+    AcquireSRWLockExclusive(&g_dbWriteLock);
+    sqlite3_exec(g_db,
+        "DELETE FROM key_counts; DELETE FROM key_daily;",
+        nullptr, nullptr, nullptr);
+    ReleaseSRWLockExclusive(&g_dbWriteLock);
+}
+
+static int run_summary_query(const char *sql, const char *from, const char *to,
+                             const char *app, bool bindApp,
+                             SummaryStat **out_stats)
+{
+    if (out_stats) *out_stats = nullptr;
+    if (!g_db || !out_stats || !from || !to) return 0;
+
+    sqlite3_stmt *stmt = nullptr;
+    if (sqlite3_prepare_v2(g_db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        return 0;
+
+    sqlite3_bind_text(stmt, 1, from, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, to, -1, SQLITE_STATIC);
+    if (bindApp) {
+        const char *appFilter = (app && app[0]) ? app : "";
+        sqlite3_bind_text(stmt, 3, appFilter, -1, SQLITE_STATIC);
+    }
+
+    int cap = 64, cnt = 0;
+    SummaryStat *rows = malloc(sizeof(SummaryStat) * cap);
+    if (!rows) {
+        sqlite3_finalize(stmt);
+        return 0;
+    }
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        if (cnt >= cap) {
+            cap *= 2;
+            SummaryStat *tmp = realloc(rows, sizeof(SummaryStat) * cap);
+            if (!tmp) {
+                free(rows);
+                sqlite3_finalize(stmt);
+                return 0;
+            }
+            rows = tmp;
+        }
+        const char *lbl = (const char *)sqlite3_column_text(stmt, 0);
+        if (lbl) strncpy(rows[cnt].label, lbl, 255);
+        else rows[cnt].label[0] = '\0';
+        rows[cnt].label[255] = '\0';
+        rows[cnt].kb_count = sqlite3_column_int64(stmt, 1);
+        rows[cnt].mouse_count = sqlite3_column_int64(stmt, 2);
+        rows[cnt].total_count = sqlite3_column_int64(stmt, 3);
+        cnt++;
+    }
+    sqlite3_finalize(stmt);
+
+    if (cnt == 0) {
+        free(rows);
+        return 0;
+    }
+    *out_stats = rows;
+    return cnt;
+}
+
+int db_get_app_stats(const char *from, const char *to, SummaryStat **out_stats)
+{
+    const char *sql =
+        "SELECT CASE WHEN app = '' THEN '(Unknown)' ELSE app END AS grp, "
+        "COALESCE(SUM(CASE WHEN key_code NOT IN (1, 2, 4, 5, 6) THEN count ELSE 0 END), 0), "
+        "COALESCE(SUM(CASE WHEN key_code IN (1, 2, 4, 5, 6) THEN count ELSE 0 END), 0), "
+        "COALESCE(SUM(count), 0) "
+        "FROM key_daily "
+        "WHERE date >= ?1 AND date <= ?2 "
+        "GROUP BY grp "
+        "ORDER BY SUM(count) DESC;";
+    return run_summary_query(sql, from, to, nullptr, false, out_stats);
+}
+
+int db_get_daily_stats(const char *from, const char *to, const char *app,
+                         SummaryStat **out_stats)
+{
+    const char *sql =
+        "SELECT date AS grp, "
+        "COALESCE(SUM(CASE WHEN key_code NOT IN (1, 2, 4, 5, 6) THEN count ELSE 0 END), 0), "
+        "COALESCE(SUM(CASE WHEN key_code IN (1, 2, 4, 5, 6) THEN count ELSE 0 END), 0), "
+        "COALESCE(SUM(count), 0) "
+        "FROM key_daily "
+        "WHERE date >= ?1 AND date <= ?2 "
+        "AND (?3 = '' OR app = ?3) "
+        "GROUP BY date "
+        "ORDER BY date DESC;";
+    return run_summary_query(sql, from, to, app, true, out_stats);
+}
+
+void db_free_summary_stats(SummaryStat *stats)
+{
+    free(stats);
 }
 
 int64_t db_get_today_count(void)

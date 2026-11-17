@@ -21,6 +21,8 @@ void cloudsync_free_history(CloudSyncEntry *e);
 void cloudsync_set_schedule(int value);
 [[nodiscard]] int  cloudsync_get_compress(void);
 void cloudsync_set_compress(int value);
+[[nodiscard]] int  cloudsync_get_keep_count(void);
+void cloudsync_set_keep_count(int value);
 void cloudsync_init(void);
 
 #endif
